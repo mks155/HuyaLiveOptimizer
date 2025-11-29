@@ -1,14 +1,18 @@
 // ==UserScript==
 // @name         HuyaLiveOptimizer | 虎牙直播优化器
-// @namespace    https://github.com/mks155/HuyaLiveOptimizer
+// @namespace    https://github.com/mks155
+// @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://www.huya.com/favicon.ico
-// @version      1.0.0
+// @version      1.0.1
 // @description  Automatically unlock quality restrictions, switch to highest/specified quality, and enter theater mode for Huya Live | 自动解锁画质限制、切换最高/指定画质、进入观影模式
 // @author       mks155
+// @copyright 2025, mks155 (https://github.com/mks155)
 // @match        *://*.huya.com/*
 // @grant        unsafeWindow
 // @license      MIT
 // @noframes
+// @downloadURL https://openuserjs.org/install/mks155/HuyaLiveOptimizer_虎牙直播优化器.user.js
+// @updateURL https://openuserjs.org/meta/mks155/HuyaLiveOptimizer_虎牙直播优化器.meta.js
 // ==/UserScript==
 
 (function() {
