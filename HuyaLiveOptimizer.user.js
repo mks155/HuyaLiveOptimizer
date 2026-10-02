@@ -3,8 +3,8 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://www.huya.com/favicon.ico
-// @version      2.0.0
-// @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度（最高 4K/蓝光50M）、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
+// @version      2.0.1
+// @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright 2025, mks155 (https://github.com/mks155)
 // @match        *://*.huya.com/*
@@ -31,6 +31,7 @@
         '蓝光50M',
         '蓝光30M',
         '蓝光20M',
+        '蓝光15M',
         '蓝光10M',
         '蓝光8M',
         '蓝光4M',
@@ -54,7 +55,7 @@
         giftRightUl: '.player-gift-right ul',
         nobleBtn: '#player-noble-btn',
         danmuWrap: '#danmuwrap, #player-danmu-wrap, .danmu-wrap',
-        danmuItem: '.danmu-item',
+        danmuItem: ['.danmu-item', '.player-danmu-item'],
         sendBtn: '#msg_send_bt',
         inputCandidates: [
             '#pub_msg_input',
@@ -145,7 +146,7 @@
         return new Promise((resolve, reject) => {
             const start = Date.now();
             const tick = () => {
-                let ok = false;
+                let ok;
                 try {
                     ok = !!fn();
                 } catch (e) {
@@ -244,19 +245,6 @@
         }
     }
 
-    function clickEl(el) {
-        if (!el) return false;
-        try {
-            const $ = page$();
-            if ($) $(el).click();
-            else el.click();
-            return true;
-        } catch (e) {
-            warn('click failed', e);
-            return false;
-        }
-    }
-
     // ---------- styles ----------
     function injectStyles() {
         if (document.getElementById('hlo-styles')) return;
@@ -295,7 +283,8 @@
 #hlo-danmu-freeze{
   position:fixed;z-index:2147483001;display:flex;align-items:center;gap:8px;
   pointer-events:auto!important;max-width:min(90vw,640px);
-  padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.55)
+  padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.55);
+  user-select:none;-webkit-user-select:none
 }
 #hlo-danmu-freeze .hlo-freeze-text{
   color:#fff;font-size:16px;font-weight:700;line-height:24px;
@@ -309,7 +298,6 @@
   line-height:26px;cursor:pointer;box-shadow:0 1px 6px rgba(0,0,0,.4);white-space:nowrap
 }
 #hlo-danmu-freeze .hlo-plus1:hover{filter:brightness(1.08)}
-body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
 `;
         document.head.appendChild(style);
     }
@@ -332,6 +320,16 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             if (t && t.length <= 60) return t;
         }
         return (item.textContent || '').trim().slice(0, 60);
+    }
+
+    /** 从任意后代节点向上找到弹幕条目（虎牙改版时类名可能变，故可多配） */
+    function closestDanmuItem(el) {
+        if (!el || typeof el.closest !== 'function') return null;
+        for (const sel of SEL.danmuItem) {
+            const found = el.closest(sel);
+            if (found) return found;
+        }
+        return null;
     }
 
     // ---------- player optimizer ----------
@@ -377,18 +375,32 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             return el ? (el.textContent || '').trim() : '';
         }
 
+        /** 当前画质是否已经等于目标（忽略空格大小写差异） */
+        isCurrentQuality(target) {
+            return PlayerOptimizer.normalize(this.currentQualityText()) === PlayerOptimizer.normalize(target);
+        }
+
         /** li 内可能有「扫码即享」等附加 span，只取第一个 span 文本 */
         static nameOf($, li) {
             const $span = $(li).find('span').first();
             return ($span.length ? $span.text() : $(li).text()).trim();
         }
 
+        /** 归一化画质名：去空格 / 全角空格，避免「蓝光 15M」这类写法匹配不上 */
+        static normalize(name) {
+            return String(name == null ? '' : name)
+                .replace(/[\s\u00a0\u3000]/g, '')
+                .toUpperCase();
+        }
+
         resolveTarget($, $list) {
             const nameOf = (li) => PlayerOptimizer.nameOf($, li);
             const pick = (name) => {
+                const want = PlayerOptimizer.normalize(name);
+                if (!want) return null;
                 let hit = null;
                 $list.each((_, li) => {
-                    if (!hit && nameOf(li) === name) hit = li;
+                    if (!hit && PlayerOptimizer.normalize(nameOf(li)) === want) hit = li;
                 });
                 return hit;
             };
@@ -409,7 +421,7 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
 
         async waitForQuality(target, timeout = 8000) {
             try {
-                await waitFor(() => this.currentQualityText() === target, {
+                await waitFor(() => this.isCurrentQuality(target), {
                     timeout,
                     interval: 250,
                     label: `quality ${target}`
@@ -433,7 +445,7 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             const { el, text } = this.resolveTarget($, $list);
             if (!el || !text) throw new Error('target quality missing');
 
-            if (this.currentQualityText() === text) {
+            if (this.isCurrentQuality(text)) {
                 this.qualityDone = true;
                 return true;
             }
@@ -718,15 +730,25 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
 
     // ---------- 画面弹幕 +1：轻量文本冻结层 ----------
     // 禁止 cloneNode（复杂弹幕会触发明显卡顿）；只隐藏原节点 + 绘制文字条。
+    //
+    // 【移出即复原】关键：原节点一旦 visibility:hidden 就退出 hit-test，
+    // 浏览器不会再给它派发 mouseout/mouseleave，而冻结条又可能被弹幕层压住
+    // 同样收不到事件 —— 只靠鼠标事件判定会出现「鼠标移走了弹幕还在」。
+    // 所以复原判定改成：坐标兜底（document mousemove / 400ms 巡检）
+    // + 冻结条自身 mouseleave 双保险，指针一旦离开冻结条矩形就立刻复原。
     class ScreenPlusOne {
         constructor(settings) {
             this.settings = settings;
             this.overlay = null;
             this.ghost = null;
             this.bound = false;
+            this.wrap = null;
             this.lastShow = 0;
             this.pendingItem = null;
             this.throttleTimer = 0;
+            this.watchTimer = 0;
+            this.lastPoint = null;
+            this.barRect = null;
         }
 
         update(settings) {
@@ -734,7 +756,21 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             if (settings.enableScreenPlusOne === false) this.clear();
         }
 
+        enabled() {
+            return this.settings.enableScreenPlusOne !== false;
+        }
+
+        /** 指针是否落在冻结条矩形内 */
+        inBar(p) {
+            const r = this.barRect;
+            return !!p && !!r && p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
+        }
+
         clear() {
+            if (this.watchTimer) {
+                clearInterval(this.watchTimer);
+                this.watchTimer = 0;
+            }
             if (this.overlay) {
                 this.overlay.remove();
                 this.overlay = null;
@@ -744,22 +780,24 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
                 delete this.ghost.dataset.hloGhost;
                 this.ghost = null;
             }
+            this.barRect = null;
+            this.lastPoint = null;
+            this.pendingItem = null;
         }
 
-        show(item) {
-            if (this.settings.enableScreenPlusOne === false) return;
+        show(item, pt) {
+            if (!this.enabled()) return;
             if (this.ghost === item) return;
 
             const now = Date.now();
             // 节流：弹幕密集时避免高频建删 DOM
             if (now - this.lastShow < 80) {
-                this.pendingItem = item;
+                this.pendingItem = { item, pt };
                 if (!this.throttleTimer) {
                     this.throttleTimer = setTimeout(() => {
                         this.throttleTimer = 0;
-                        const el = this.pendingItem;
-                        this.pendingItem = null;
-                        if (el && document.body.contains(el)) this.show(el);
+                        const p = this.pendingItem;
+                        if (p && document.body.contains(p.item)) this.show(p.item, p.pt);
                     }, 80);
                 }
                 return;
@@ -786,13 +824,17 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             btn.type = 'button';
             btn.className = 'hlo-plus1';
             btn.textContent = '+1';
-            btn.title = '我也发一条';
-            btn.addEventListener('mousedown', (e) => e.preventDefault());
+            btn.title = '我也发一条（可连点）';
+            btn.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                if (this.settings.enableScreenPlusOne !== false) sendDanmaku(text);
-                this.clear();
+                // 点击瞬间再取一次文本，保证复读内容与当前弹幕一致
+                const value = extractDanmuText(this.ghost) || text;
+                if (this.enabled()) sendDanmaku(value);
             });
             wrap.appendChild(btn);
 
@@ -813,33 +855,61 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             item.dataset.hloGhost = '1';
             this.ghost = item;
             this.overlay = wrap;
+            this.lastPoint = pt || null;
+            this.barRect = { left, top, right: left + bw, bottom: top + bh };
 
             wrap.addEventListener('mouseleave', () => {
                 setTimeout(() => {
-                    if (this.overlay === wrap && !wrap.matches(':hover')) this.clear();
-                }, 120);
+                    if (this.overlay !== wrap || wrap.matches(':hover')) return;
+                    this.clear();
+                }, 100);
             });
+
+            this.watch();
+        }
+
+        /** 兜底巡检：原弹幕被移除、或指针没动却已移出时收摊复原 */
+        watch() {
+            if (this.watchTimer) return;
+            this.watchTimer = setInterval(() => {
+                if (!this.overlay) {
+                    clearInterval(this.watchTimer);
+                    this.watchTimer = 0;
+                    return;
+                }
+                if (!this.ghost || !this.ghost.isConnected) {
+                    this.clear();
+                    return;
+                }
+                if (this.lastPoint && !this.inBar(this.lastPoint)) this.clear();
+            }, 400);
         }
 
         bind() {
             if (this.bound) return;
             this.bound = true;
 
-            const onOver = (e) => {
-                if (this.settings.enableScreenPlusOne === false) return;
+            this.onOver = (e) => {
+                if (!this.enabled()) return;
                 // 快速路径：不是元素或明显无关节点直接返回
                 const t = e.target;
                 if (!t || t.nodeType !== 1) return;
-                if (t.id === 'hlo-danmu-freeze' || t.closest?.('#hlo-danmu-freeze')) return;
-                const item = t.closest?.(SEL.danmuItem);
-                if (!item || item.dataset.hloGhost) return;
-                this.show(item);
+                if (t.closest?.('#hlo-danmu-freeze')) return;
+                const item = closestDanmuItem(t);
+                if (!item || item === this.ghost || item.dataset.hloGhost) return;
+                const pt = { x: e.clientX, y: e.clientY };
+                // 冻结条可能压在弹幕层之下：指针还落在条上时不要换弹幕（避免抖动）
+                if (this.inBar(pt)) return;
+                this.show(item, pt);
             };
 
             const attach = () => {
                 const wrap = queryOne(SEL.danmuWrap);
                 if (!wrap) return false;
-                wrap.addEventListener('mouseover', onOver, { capture: true, passive: true });
+                if (this.wrap === wrap) return true;
+                if (this.wrap) this.wrap.removeEventListener('mouseover', this.onOver, true);
+                this.wrap = wrap;
+                wrap.addEventListener('mouseover', this.onOver, { capture: true, passive: true });
                 return true;
             };
 
@@ -848,9 +918,35 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
                 let n = 0;
                 const t = setInterval(() => {
                     n += 1;
-                    if (attach() || n > 40) clearInterval(t);
+                    if (attach() || n > 60) clearInterval(t);
                 }, 1000);
             }
+
+            // 主判据：指针坐标一旦离开冻结条就复原（不依赖 mouseout，因为被隐藏的
+            // 原弹幕已经不再产生鼠标事件）。空闲时直接 return，开销可忽略。
+            document.addEventListener(
+                'mousemove',
+                (e) => {
+                    if (!this.overlay) return;
+                    this.lastPoint = { x: e.clientX, y: e.clientY };
+                    if (!this.inBar(this.lastPoint)) this.clear();
+                },
+                { capture: true, passive: true }
+            );
+
+            // 鼠标移出窗口（relatedTarget 为 null）同样复原
+            document.addEventListener(
+                'mouseout',
+                (e) => {
+                    if (this.overlay && !e.relatedTarget) this.clear();
+                },
+                { capture: true, passive: true }
+            );
+            document.documentElement.addEventListener('mouseleave', () => this.clear());
+            window.addEventListener('blur', () => this.clear());
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) this.clear();
+            });
 
             // 低优先级清理，避免 scroll 捕获在弹幕层高频触发
             window.addEventListener(
@@ -1015,10 +1111,6 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
         }
     }
 
-    function applyFlags(s) {
-        document.body?.classList.toggle('hlo-plus1-on', s.enableScreenPlusOne !== false);
-    }
-
     // ---------- bootstrap（分层延迟，减轻进房头几秒卡顿） ----------
     function main() {
         // 样式与设置很轻，立即做
@@ -1033,10 +1125,7 @@ body.hlo-plus1-on .danmu-item[data-hlo-ghost]{visibility:hidden!important}
             plusOne.update(next);
             history.update(next);
             optimizer.updateSettings(next);
-            applyFlags(next);
         });
-
-        applyFlags(settings);
 
         // 核心路径尽快；次要功能仍 idle
         optimizer.startWatchdog();
