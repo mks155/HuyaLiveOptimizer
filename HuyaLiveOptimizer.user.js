@@ -1,26 +1,33 @@
 // ==UserScript==
-// @name         HuyaLiveOptimizer | 虎牙直播优化器
+// @name         虎牙直播优化器 | HuyaLiveOptimizer
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
-// @icon         https://www.huya.com/favicon.ico
-// @version      2.0.1
+// @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
+// @version      2.2.1
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
-// @copyright 2025, mks155 (https://github.com/mks155)
+// @copyright    2025, mks155 (https://github.com/mks155)
 // @match        *://*.huya.com/*
 // @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @license      MIT
 // @noframes
 // @run-at       document-idle
-// @downloadURL https://openuserjs.org/install/mks155/HuyaLiveOptimizer_%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8.user.js
-// @updateURL https://openuserjs.org/meta/mks155/HuyaLiveOptimizer_%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8.meta.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     const NS = 'HuyaLiveOptimizer';
-    /** 统一本地存储键：设置 + 弹幕历史 */
+    const FALLBACK_VERSION = '2.2.1';
+    const VERSION = (() => {
+        try {
+            if (typeof GM_info !== 'undefined' && GM_info?.scriptMeta?.version) return String(GM_info.scriptMeta.version);
+        } catch (e) {
+        }
+        return FALLBACK_VERSION;
+    })();
     const STORAGE_KEY = 'huya_optimizer';
     const MAX_HISTORY = 50;
 
@@ -40,11 +47,28 @@
     ];
     const QUALITY_AUTO = '';
 
+    const FANS_BADGE_DELAY = 15000;
+    const FANS_CHECKIN_DELAY = 30000;
+    const FANS_BADGE_RETRY = 6000;
+    const FANS_BADGE_MAX_TRIES = 12;
+
+    const THEME_MODES = ['auto', 'light', 'dark'];
+    const THEME_LABEL = { auto: '跟随浏览器', light: '白天', dark: '夜晚' };
+    const THEME_ICON = {
+        auto: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 20.5h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M12 13.5V8.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="7.6" r="1.5" fill="currentColor"/></svg>',
+        light: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="currentColor"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+        dark: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M20.5 14.2A8.6 8.6 0 0 1 9.8 3.5a8.7 8.7 0 1 0 10.7 10.7z" fill="currentColor"/></svg>'
+    };
+
     const DEFAULT_SETTINGS = {
         targetQuality: QUALITY_AUTO,
         autoTheater: true,
         enableScreenPlusOne: true,
-        enableDanmakuHistory: true
+        enableDanmakuHistory: true,
+        enableFansBadge: true,
+        enableFansCheckIn: true,
+        // auto=跟随浏览器 / light=白天 / dark=夜晚
+        themeMode: 'auto'
     };
 
     const SEL = {
@@ -57,6 +81,17 @@
         danmuWrap: '#danmuwrap, #player-danmu-wrap, .danmu-wrap',
         danmuItem: ['.danmu-item', '.player-danmu-item'],
         sendBtn: '#msg_send_bt',
+        // 粉丝团面板：靠 TT.event.emit('FAN_CLUB_OPEN', tab, host) 打开，不是点出来的
+        fansPanel: '[class*="FanClubBd--"]',
+        fansBadgeItem: '[class*="BadgeItem--"]',
+        fansBadgeImg: 'img[class*="Floor--"]',
+        fansBadgeKind: '[class*="CustomBadge--"]',
+        // 弹幕颜色面板只在可见时渲染；同一 portal 下有多个面板，要按标题认领
+        fansBarragePortal: '.J_PortalChatPanelRoot',
+        fansBarrageHead: '[class*="PanelHd--"]',
+        fansBarrageItem: '[class*="item--"]',
+        // 触发按钮：给它的原生 mouseenter 派发合成事件即可渲染出面板
+        fansBarrageTrigger: '#J-room-chat-color',
         inputCandidates: [
             '#pub_msg_input',
             '.chat-room__input input[type="text"]',
@@ -72,28 +107,23 @@
 
     // ---------- storage ----------
     const store = {
-        ls() {
-            try {
-                return unsafeWindow.localStorage || window.localStorage;
-            } catch (e) {
-                return null;
-            }
-        },
         get(key, fallback) {
             try {
-                const raw = this.ls()?.getItem(key);
+                const raw = GM_getValue(key, null);
                 if (raw == null) return fallback;
-                const parsed = JSON.parse(raw);
-                return parsed == null ? fallback : parsed;
+                return typeof raw === 'string' ? JSON.parse(raw) : raw;
             } catch (e) {
+                warn('store.get 失败', e);
                 return fallback;
             }
         },
         set(key, value) {
             try {
-                this.ls()?.setItem(key, JSON.stringify(value));
+                GM_setValue(key, JSON.stringify(value));
+                return true;
             } catch (e) {
-                /* quota / private mode */
+                warn('store.set 失败', e);
+                return false;
             }
         }
     };
@@ -115,7 +145,10 @@
             targetQuality: data.targetQuality ?? DEFAULT_SETTINGS.targetQuality,
             autoTheater: data.autoTheater ?? DEFAULT_SETTINGS.autoTheater,
             enableScreenPlusOne: data.enableScreenPlusOne ?? DEFAULT_SETTINGS.enableScreenPlusOne,
-            enableDanmakuHistory: data.enableDanmakuHistory ?? DEFAULT_SETTINGS.enableDanmakuHistory
+            enableDanmakuHistory: data.enableDanmakuHistory ?? DEFAULT_SETTINGS.enableDanmakuHistory,
+            enableFansBadge: data.enableFansBadge ?? DEFAULT_SETTINGS.enableFansBadge,
+            enableFansCheckIn: data.enableFansCheckIn ?? DEFAULT_SETTINGS.enableFansCheckIn,
+            themeMode: THEME_MODES.includes(data.themeMode) ? data.themeMode : DEFAULT_SETTINGS.themeMode
         };
     }
 
@@ -124,7 +157,10 @@
             targetQuality: s.targetQuality,
             autoTheater: s.autoTheater,
             enableScreenPlusOne: s.enableScreenPlusOne,
-            enableDanmakuHistory: s.enableDanmakuHistory
+            enableDanmakuHistory: s.enableDanmakuHistory,
+            enableFansBadge: s.enableFansBadge,
+            enableFansCheckIn: s.enableFansCheckIn,
+            themeMode: s.themeMode
         });
     }
 
@@ -167,7 +203,6 @@
                 const el = root.querySelector(sel);
                 if (el) return el;
             } catch (e) {
-                /* invalid */
             }
         }
         return null;
@@ -236,7 +271,6 @@
         return queryOne([SEL.sendBtn, '.btn-sendMsg', '.chat-room__input .btn-sendMsg']);
     }
 
-    /** 空闲/延迟调度，避免进房头几秒抢主线程 */
     function scheduleIdle(fn, timeout = 4000) {
         if (typeof requestIdleCallback === 'function') {
             requestIdleCallback(() => fn(), { timeout });
@@ -251,35 +285,59 @@
         const style = document.createElement('style');
         style.id = 'hlo-styles';
         style.textContent = `
+ul.player-gift-right{width:max-content!important;min-width:228px;display:flex!important;flex-wrap:nowrap!important;align-items:flex-start}
+ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-settings-btn{cursor:pointer!important;user-select:none;color:#f80!important}
 #hlo-settings-btn:hover{color:#ffaa33!important}
-#hlo-settings-btn i{width:24px;height:24px;display:inline-block;margin-top:8px;background:none!important;line-height:0}
-#hlo-settings-btn i svg{display:block;width:24px;height:24px}
-#hlo-settings-btn p{margin-top:-1px;font-size:12px;line-height:14px;text-align:center;color:inherit}
+#hlo-settings-btn i{width:24px;height:24px;display:inline-block;margin-top:8px;background:none!important;line-height:0;transition:filter .15s ease}
+#hlo-settings-btn:hover i{filter:brightness(1.18)}
+#hlo-settings-btn i svg{display:block;width:24px;height:24px;border-radius:5px;overflow:hidden}
+#hlo-settings-btn p{margin:0;font-size:12px;line-height:18px;text-align:center;color:inherit;white-space:nowrap}
 
 #hlo-settings-backdrop{position:fixed;inset:0;z-index:2147483645;background:transparent}
 #hlo-settings-panel{
+  --hlo-bg:#1f1f23;--hlo-fg:#eee;--hlo-title:#fff;--hlo-border:#3a3a40;--hlo-muted:#bbb;--hlo-faint:#888;
+  --hlo-sep:#34343a;--hlo-weak:#6e6e78;--hlo-sel-bg:#2a2a30;--hlo-sel-fg:#eee;--hlo-sel-br:#444;
+  --hlo-ghost-bg:#333;--hlo-ghost-fg:#ddd;--hlo-shadow:0 8px 28px rgba(0,0,0,.55);--hlo-btn:#f80;
   position:fixed;z-index:2147483646;width:280px;box-sizing:border-box;
-  background:#1f1f23;color:#eee;border:1px solid #3a3a40;border-radius:8px;
-  box-shadow:0 8px 28px rgba(0,0,0,.55);padding:12px 14px 14px;
+  background:var(--hlo-bg);color:var(--hlo-fg);border:1px solid var(--hlo-border);border-radius:8px;
+  box-shadow:var(--hlo-shadow);padding:12px 14px 14px;
   font:13px/1.5 inherit;pointer-events:auto!important
 }
+#hlo-settings-panel[data-theme="light"]{
+  --hlo-bg:#fff;--hlo-fg:#222;--hlo-title:#111;--hlo-border:#d8d8dc;--hlo-muted:#555;--hlo-faint:#888;
+  --hlo-sep:#e6e6ea;--hlo-weak:#9a9aa2;--hlo-sel-bg:#f2f2f5;--hlo-sel-fg:#222;--hlo-sel-br:#ccc;
+  --hlo-ghost-bg:#ececf0;--hlo-ghost-fg:#333;--hlo-shadow:0 8px 28px rgba(0,0,0,.18);--hlo-btn:#f80;
+}
 #hlo-settings-panel *{pointer-events:auto!important}
-#hlo-settings-panel h3{margin:0 0 10px;font-size:14px;font-weight:600;color:#fff}
+#hlo-settings-panel .hlo-head{display:flex;align-items:flex-start;gap:8px;margin:0 0 10px}
+#hlo-settings-panel h3{flex:1;min-width:0;margin:0;font-size:14px;font-weight:600;color:var(--hlo-title)}
+#hlo-settings-panel .hlo-head-right{display:flex;align-items:center;gap:2px;flex:0 0 auto}
+#hlo-settings-panel .ver{font-size:10px;color:var(--hlo-weak);white-space:nowrap}
+#hlo-settings-panel #hlo-theme{
+  flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:none!important;border-radius:4px;
+  color:var(--hlo-muted);cursor:pointer;line-height:0;transition:color .15s,background .15s
+}
+#hlo-settings-panel #hlo-theme:hover{color:var(--hlo-title);background:var(--hlo-ghost-bg)}
+#hlo-settings-panel #hlo-theme svg[data-mode]{display:none}
+#hlo-settings-panel #hlo-theme svg[data-active="1"]{display:block}
 #hlo-settings-panel label.row{display:flex;align-items:center;gap:8px;margin:8px 0;cursor:pointer}
 #hlo-settings-panel select{
   width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;
-  border-radius:4px;border:1px solid #444;background:#2a2a30;color:#eee;font-size:13px
+  border-radius:4px;border:1px solid var(--hlo-sel-br);background:var(--hlo-sel-bg);color:var(--hlo-sel-fg);font-size:13px
 }
 #hlo-settings-panel .field{margin-bottom:8px}
-#hlo-settings-panel .field-label{color:#bbb;font-size:12px}
+#hlo-settings-panel .field-label{color:var(--hlo-muted);font-size:12px}
 #hlo-settings-panel .actions{display:flex;gap:8px;margin-top:12px}
 #hlo-settings-panel button{flex:1;padding:7px 0;border:none;border-radius:4px;cursor:pointer;font-size:13px}
-#hlo-settings-panel .btn-primary{background:#f80;color:#111;font-weight:600}
-#hlo-settings-panel .btn-ghost{background:#333;color:#ddd}
-#hlo-settings-panel .hint{margin-top:8px;color:#888;font-size:11px}
+#hlo-settings-panel .btn-primary{background:var(--hlo-btn);color:#111;font-weight:600}
+#hlo-settings-panel .btn-ghost{background:var(--hlo-ghost-bg);color:var(--hlo-ghost-fg)}
+#hlo-settings-panel .hint{margin-top:8px;color:var(--hlo-faint);font-size:11px}
+#hlo-settings-panel .credits{margin:10px 0 -6px;padding-top:8px;border-top:1px solid var(--hlo-sep);color:var(--hlo-weak);font-size:11px;text-align:center}
+#hlo-settings-panel .credits .ver{margin-bottom:3px}
+#hlo-settings-panel .credits a{color:var(--hlo-btn);text-decoration:underline}
+#hlo-settings-panel .credits a:hover{color:#ffc45c}
 
-/* 轻量冻结条：只画文字 + 按钮，禁止 cloneNode */
 #hlo-danmu-freeze{
   position:fixed;z-index:2147483001;display:flex;align-items:center;gap:8px;
   pointer-events:auto!important;max-width:min(90vw,640px);
@@ -302,12 +360,60 @@
         document.head.appendChild(style);
     }
 
-    function hexScrewSvg() {
+    function optimizerIconSvg() {
         return (
-            '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-            '<polygon points="12,1.5 21,6.5 21,17.5 12,22.5 3,17.5 3,6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>' +
-            '<rect x="6.5" y="10.5" width="11" height="3" rx="1.2" fill="currentColor"/>' +
-            '<circle cx="12" cy="12" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+            '<svg viewBox="0 0 512 512" width="24" height="24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+            '<defs>' +
+            '<linearGradient id="hloIcoBg" x1="0%" y1="0%" x2="100%" y2="100%">' +
+            '<stop offset="0%" stop-color="#12121A"/><stop offset="100%" stop-color="#1C1C2A"/>' +
+            '</linearGradient>' +
+            '<linearGradient id="hloIcoYlw" x1="0%" y1="0%" x2="0%" y2="100%">' +
+            '<stop offset="0%" stop-color="#FFE033"/><stop offset="100%" stop-color="#FFA500"/>' +
+            '</linearGradient>' +
+            '<linearGradient id="hloIcoCyn" x1="0%" y1="100%" x2="100%" y2="0%">' +
+            '<stop offset="0%" stop-color="#00E5FF"/><stop offset="100%" stop-color="#00FF88"/>' +
+            '</linearGradient>' +
+            '<filter id="hloIcoShd" x="-20%" y="-20%" width="140%" height="140%">' +
+            '<feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.5"/>' +
+            '</filter>' +
+            '</defs>' +
+            '<rect width="512" height="512" rx="115" fill="url(#hloIcoBg)"/>' +
+            '<g opacity="0.92">' +
+            '<circle cx="256" cy="256" r="205" fill="none" stroke="url(#hloIcoCyn)" stroke-width="12" stroke-dasharray="26 18" opacity="0.55"/>' +
+            '<circle cx="256" cy="256" r="186" fill="none" stroke="#00E5FF" stroke-width="3" opacity="0.35"/>' +
+            '<g transform="translate(402 108) rotate(18) scale(1.18)">' +
+            '<g fill="url(#hloIcoCyn)">' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(45)"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(90)"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(135)"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(180)"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(225)"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(270)"/>' +
+            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(315)"/>' +
+            '<circle cx="0" cy="0" r="23"/>' +
+            '</g>' +
+            '<circle cx="0" cy="0" r="9.5" fill="#141420"/>' +
+            '<circle cx="0" cy="0" r="9.5" fill="none" stroke="#86FFF4" stroke-opacity="0.35" stroke-width="3"/>' +
+            '</g>' +
+            '<g transform="translate(115 405) rotate(45) scale(1.25)">' +
+            '<path d="M -10 42 L -10 -4 C -21 -7 -28 -17 -28 -30 L -28 -52 L -12 -35 L 12 -35 L 28 -52 L 28 -30 C 28 -17 21 -7 10 -4 L 10 42 A 10 10 0 0 1 -10 42 Z" ' +
+            'fill="url(#hloIcoCyn)" stroke="#00323B" stroke-opacity="0.4" stroke-width="2" stroke-linejoin="round"/>' +
+            '<circle cx="0" cy="32" r="4.5" fill="#141420" stroke="#86FFF4" stroke-opacity="0.3" stroke-width="2"/>' +
+            '<path d="M -3.5 -26 L -3.5 24" fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="4" stroke-linecap="round"/>' +
+            '</g>' +
+            '</g>' +
+            '<g filter="url(#hloIcoShd)">' +
+            '<path d="M 186 182 C 186 122, 326 122, 326 182 C 326 268, 296 342, 256 424 C 216 342, 186 268, 186 182 Z" ' +
+            'fill="url(#hloIcoYlw)" stroke="#4A2E15" stroke-width="14" stroke-linejoin="round"/>' +
+            '<path d="M 216 196 Q 214 268, 242 346" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.45"/>' +
+            '<path d="M 234 226 L 292 262 L 234 298 Z" fill="#4A2E15" stroke="#4A2E15" stroke-width="17" stroke-linejoin="round"/>' +
+            '</g>' +
+            '<g>' +
+            '<rect x="156" y="452" width="200" height="38" rx="19" fill="#00E5FF" opacity="0.16"/>' +
+            '<rect x="156" y="452" width="200" height="38" rx="19" fill="none" stroke="#00E5FF" stroke-width="2" opacity="0.55"/>' +
+            '<text x="256" y="479" font-family="Arial, sans-serif" font-weight="900" font-size="22" fill="#FFFFFF" text-anchor="middle" letter-spacing="3">OPTIMIZER</text>' +
+            '</g>' +
             '</svg>'
         );
     }
@@ -322,7 +428,6 @@
         return (item.textContent || '').trim().slice(0, 60);
     }
 
-    /** 从任意后代节点向上找到弹幕条目（虎牙改版时类名可能变，故可多配） */
     function closestDanmuItem(el) {
         if (!el || typeof el.closest !== 'function') return null;
         for (const sel of SEL.danmuItem) {
@@ -375,18 +480,15 @@
             return el ? (el.textContent || '').trim() : '';
         }
 
-        /** 当前画质是否已经等于目标（忽略空格大小写差异） */
         isCurrentQuality(target) {
             return PlayerOptimizer.normalize(this.currentQualityText()) === PlayerOptimizer.normalize(target);
         }
 
-        /** li 内可能有「扫码即享」等附加 span，只取第一个 span 文本 */
         static nameOf($, li) {
             const $span = $(li).find('span').first();
             return ($span.length ? $span.text() : $(li).text()).trim();
         }
 
-        /** 归一化画质名：去空格 / 全角空格，避免「蓝光 15M」这类写法匹配不上 */
         static normalize(name) {
             return String(name == null ? '' : name)
                 .replace(/[\s\u00a0\u3000]/g, '')
@@ -450,7 +552,6 @@
                 return true;
             }
 
-            // 与 1.0.1 相同：只 jQuery 点一次，不二次补点 span
             $(el).click();
             this.qualityDone = await this.waitForQuality(text, 5000);
             return this.qualityDone;
@@ -466,7 +567,6 @@
             return !!(btn && btn.classList.contains(SEL.theaterOn));
         }
 
-        /** 对齐 1.0.1：只点一次；已开则不动，避免校验失败后再点把观影关掉 */
         async enterTheater() {
             if (!this.settings.autoTheater) return true;
             if (this.isTheaterOn()) {
@@ -495,7 +595,6 @@
             if (this.running) return;
             this.running = true;
             try {
-                // 对齐 1.0.1：等 jQuery + 控件，不等 video
                 await waitForJQuery(15000);
 
                 await waitFor(() => queryOne(SEL.theaterBtn), {
@@ -517,7 +616,6 @@
                     warn('switchQuality', e);
                 }
 
-                // 1.0.1：切完画质等 800ms 再进观影
                 await sleep(800);
                 await this.enterTheater();
 
@@ -534,10 +632,8 @@
         }
 
         startWatchdog() {
-            // 1.0.1：页面稳定约 1s 后执行一次
             setTimeout(() => this.run(), 1000);
 
-            // 仅失败时有限重试（等价 RETRY_TIMES=3），成功即停
             let n = 0;
             const t = setInterval(() => {
                 n += 1;
@@ -599,8 +695,8 @@
 
             const btn = document.createElement('li');
             btn.id = 'hlo-settings-btn';
-            btn.title = 'HuyaLiveOptimizer 设置（全站）';
-            btn.innerHTML = `<i>${hexScrewSvg()}</i><p>设置</p>`;
+            btn.title = '虎牙直播优化器 设置（全站）';
+            btn.innerHTML = `<i>${optimizerIconSvg()}</i><p>设置</p>`;
             btn.addEventListener('mousedown', (e) => e.stopPropagation());
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -622,6 +718,18 @@
         }
 
         close() {
+            if (this.themeMq && this.themeMqHandler) {
+                try {
+                    if (typeof this.themeMq.removeEventListener === 'function') {
+                        this.themeMq.removeEventListener('change', this.themeMqHandler);
+                    } else if (typeof this.themeMq.removeListener === 'function') {
+                        this.themeMq.removeListener(this.themeMqHandler);
+                    }
+                } catch (e) {
+                }
+            }
+            this.themeMq = null;
+            this.themeMqHandler = null;
             this.panel?.remove();
             this.backdrop?.remove();
             this.panel = null;
@@ -654,6 +762,7 @@
             });
             document.body.appendChild(panel);
             this.panel = panel;
+            this.applyTheme(panel, this.settings.themeMode);
 
             const rect = anchor?.getBoundingClientRect?.() || {
                 left: window.innerWidth - 320,
@@ -679,8 +788,17 @@
                     return `<option value="${escapeHtml(q)}"${sel}>${escapeHtml(label)}</option>`;
                 })
                 .join('');
+            const mode = THEME_MODES.includes(this.settings.themeMode) ? this.settings.themeMode : 'auto';
+            const icons = THEME_MODES.map((m) =>
+                `<svg data-mode="${m}" data-active="${m === mode ? '1' : '0'}" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">${THEME_ICON[m].replace(/^<svg[^>]*>|<\/svg>$/g, '')}</svg>`
+            ).join('');
             return `
-                <h3>HuyaLiveOptimizer</h3>
+                <div class="hlo-head">
+                    <h3>虎牙直播优化器</h3>
+                    <div class="hlo-head-right">
+                        <button type="button" id="hlo-theme" title="界面配色：${THEME_LABEL[mode]}（点击切换）">${icons}</button>
+                    </div>
+                </div>
                 <div class="field">
                     <div class="field-label">清晰度（全站生效）</div>
                     <select id="hlo-quality-select">${opts}</select>
@@ -688,11 +806,57 @@
                 <label class="row"><input type="checkbox" id="hlo-theater" ${this.settings.autoTheater ? 'checked' : ''}/> 自动进入观影模式</label>
                 <label class="row"><input type="checkbox" id="hlo-plus1" ${this.settings.enableScreenPlusOne !== false ? 'checked' : ''}/> 画面弹幕悬浮 +1</label>
                 <label class="row"><input type="checkbox" id="hlo-history" ${this.settings.enableDanmakuHistory !== false ? 'checked' : ''}/> 弹幕输入框上下键历史</label>
+                <label class="row"><input type="checkbox" id="hlo-fans-badge" ${this.settings.enableFansBadge !== false ? 'checked' : ''}/> 自动佩戴粉丝牌和弹幕颜色（15 秒）</label>
+                <label class="row"><input type="checkbox" id="hlo-fans-checkin" ${this.settings.enableFansCheckIn !== false ? 'checked' : ''}/> 有粉丝牌则自动打卡（30 秒）</label>
                 <div class="actions">
                     <button type="button" class="btn-ghost" id="hlo-close">关闭</button>
                     <button type="button" class="btn-primary" id="hlo-save">保存并应用</button>
                 </div>
+                <div class="credits">
+                    <div class="ver">v${escapeHtml(VERSION)}</div>
+                    <div>Powered by <a href="https://mks155.github.io" target="_blank" rel="noopener noreferrer">mks155</a></div>
+                </div>
             `;
+        }
+
+        resolveTheme(mode) {
+            if (mode === 'light' || mode === 'dark') return mode;
+            try {
+                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            } catch (e) {
+                return 'dark';
+            }
+        }
+
+        applyTheme(panel, mode) {
+            if (!panel) return;
+            panel.dataset.theme = this.resolveTheme(mode);
+            if (mode !== 'auto' || this.themeMq) return;
+            try {
+                this.themeMq = window.matchMedia('(prefers-color-scheme: dark)');
+                this.themeMqHandler = () => this.applyTheme(panel, 'auto');
+                if (typeof this.themeMq.addEventListener === 'function') {
+                    this.themeMq.addEventListener('change', this.themeMqHandler);
+                } else if (typeof this.themeMq.addListener === 'function') {
+                    this.themeMq.addListener(this.themeMqHandler);
+                }
+            } catch (e) {
+            }
+        }
+
+        /** 切主题：立即生效并落盘（配色是纯显示偏好，不等「保存并应用」） */
+        cycleTheme(panel) {
+            const cur = THEME_MODES.includes(this.settings.themeMode) ? this.settings.themeMode : 'auto';
+            const next = THEME_MODES[(THEME_MODES.indexOf(cur) + 1) % THEME_MODES.length];
+            this.settings.themeMode = next;
+            saveSettings(this.settings);
+            panel.querySelectorAll('#hlo-theme svg[data-mode]').forEach((svg) => {
+                svg.dataset.active = svg.dataset.mode === next ? '1' : '0';
+            });
+            const btn = panel.querySelector('#hlo-theme');
+            if (btn) btn.title = `界面配色：${THEME_LABEL[next]}（点击切换）`;
+            this.applyTheme(panel, next);
+            log('theme ->', next);
         }
 
         bind(panel) {
@@ -701,13 +865,22 @@
                 this.close();
             });
 
+            panel.querySelector('#hlo-theme')?.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.cycleTheme(panel);
+            });
+
             panel.querySelector('#hlo-save')?.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 this.settings = {
                     targetQuality: panel.querySelector('#hlo-quality-select')?.value ?? QUALITY_AUTO,
                     autoTheater: !!panel.querySelector('#hlo-theater')?.checked,
                     enableScreenPlusOne: !!panel.querySelector('#hlo-plus1')?.checked,
-                    enableDanmakuHistory: !!panel.querySelector('#hlo-history')?.checked
+                    enableDanmakuHistory: !!panel.querySelector('#hlo-history')?.checked,
+                    enableFansBadge: !!panel.querySelector('#hlo-fans-badge')?.checked,
+                    enableFansCheckIn: !!panel.querySelector('#hlo-fans-checkin')?.checked,
+                    themeMode: THEME_MODES.includes(this.settings.themeMode) ? this.settings.themeMode : 'auto'
                 };
                 saveSettings(this.settings);
                 this.onChange(this.settings);
@@ -729,13 +902,6 @@
     }
 
     // ---------- 画面弹幕 +1：轻量文本冻结层 ----------
-    // 禁止 cloneNode（复杂弹幕会触发明显卡顿）；只隐藏原节点 + 绘制文字条。
-    //
-    // 【移出即复原】关键：原节点一旦 visibility:hidden 就退出 hit-test，
-    // 浏览器不会再给它派发 mouseout/mouseleave，而冻结条又可能被弹幕层压住
-    // 同样收不到事件 —— 只靠鼠标事件判定会出现「鼠标移走了弹幕还在」。
-    // 所以复原判定改成：坐标兜底（document mousemove / 400ms 巡检）
-    // + 冻结条自身 mouseleave 双保险，指针一旦离开冻结条矩形就立刻复原。
     class ScreenPlusOne {
         constructor(settings) {
             this.settings = settings;
@@ -760,7 +926,6 @@
             return this.settings.enableScreenPlusOne !== false;
         }
 
-        /** 指针是否落在冻结条矩形内 */
         inBar(p) {
             const r = this.barRect;
             return !!p && !!r && p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
@@ -790,7 +955,6 @@
             if (this.ghost === item) return;
 
             const now = Date.now();
-            // 节流：弹幕密集时避免高频建删 DOM
             if (now - this.lastShow < 80) {
                 this.pendingItem = { item, pt };
                 if (!this.throttleTimer) {
@@ -808,7 +972,6 @@
             const text = extractDanmuText(item);
             if (!text) return;
 
-            // 先读 rect，再一次性写样式，减少 layout thrash
             const rect = item.getBoundingClientRect();
             if (rect.width < 4 || rect.height < 4) return;
 
@@ -832,7 +995,6 @@
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                // 点击瞬间再取一次文本，保证复读内容与当前弹幕一致
                 const value = extractDanmuText(this.ghost) || text;
                 if (this.enabled()) sendDanmaku(value);
             });
@@ -868,7 +1030,6 @@
             this.watch();
         }
 
-        /** 兜底巡检：原弹幕被移除、或指针没动却已移出时收摊复原 */
         watch() {
             if (this.watchTimer) return;
             this.watchTimer = setInterval(() => {
@@ -891,14 +1052,12 @@
 
             this.onOver = (e) => {
                 if (!this.enabled()) return;
-                // 快速路径：不是元素或明显无关节点直接返回
                 const t = e.target;
                 if (!t || t.nodeType !== 1) return;
                 if (t.closest?.('#hlo-danmu-freeze')) return;
                 const item = closestDanmuItem(t);
                 if (!item || item === this.ghost || item.dataset.hloGhost) return;
                 const pt = { x: e.clientX, y: e.clientY };
-                // 冻结条可能压在弹幕层之下：指针还落在条上时不要换弹幕（避免抖动）
                 if (this.inBar(pt)) return;
                 this.show(item, pt);
             };
@@ -914,7 +1073,6 @@
             };
 
             if (!attach()) {
-                // 只等弹幕容器，不挂 document 全页 mouseover（进房时会加重主线程）
                 let n = 0;
                 const t = setInterval(() => {
                     n += 1;
@@ -922,8 +1080,7 @@
                 }, 1000);
             }
 
-            // 主判据：指针坐标一旦离开冻结条就复原（不依赖 mouseout，因为被隐藏的
-            // 原弹幕已经不再产生鼠标事件）。空闲时直接 return，开销可忽略。
+            // 指针坐标离开冻结条矩形就复原（隐藏的原弹幕不再派发事件）
             document.addEventListener(
                 'mousemove',
                 (e) => {
@@ -934,7 +1091,6 @@
                 { capture: true, passive: true }
             );
 
-            // 鼠标移出窗口（relatedTarget 为 null）同样复原
             document.addEventListener(
                 'mouseout',
                 (e) => {
@@ -948,7 +1104,6 @@
                 if (document.hidden) this.clear();
             });
 
-            // 低优先级清理，避免 scroll 捕获在弹幕层高频触发
             window.addEventListener(
                 'scroll',
                 () => {
@@ -1045,7 +1200,6 @@
                 }
                 el.focus();
             } catch (e) {
-                /* ignore */
             }
         }
 
@@ -1111,27 +1265,566 @@
         }
     }
 
+// ---------- 粉丝牌：自动佩戴 + 自动打卡 ----------
+    const FANS_TAB_CLUB = 0;
+    const FANS_TAB_BADGE = 1;
+
+    function openFanClub(tab, host) {
+        try {
+            const tt = unsafeWindow.TT || window.TT;
+            if (!tt || !tt.event || typeof tt.event.emit !== 'function') return false;
+            tt.event.emit('FAN_CLUB_OPEN', tab, host);
+            return true;
+        } catch (e) {
+            warn('openFanClub 失败', e);
+            return false;
+        }
+    }
+
+    // 必须用页面 realm 的 MouseEvent：沙箱构造器页面收不到且失败静默
+    function fireMouse(el, type, init = {}) {
+        if (!el) return false;
+        const doc = el.ownerDocument || document;
+        const view = doc.defaultView || unsafeWindow;
+        const Ctor = (view && view.MouseEvent) || MouseEvent;
+        let ev;
+        try {
+            ev = new Ctor(type, { bubbles: false, cancelable: false, view, ...init });
+        } catch (e) {
+            ev = doc.createEvent('MouseEvents');
+            ev.initMouseEvent(type, false, false, view, 0, 0, 0, 0, 0, false, false, false, false, 0, null);
+        }
+        el.dispatchEvent(ev);
+        return true;
+    }
+
+    /** 直接调用元素 React fiber 上的 onClick（派发鼠标事件无效，只能这么走） */
+    function reactClick(el) {
+        if (!el) return false;
+        const key = Object.keys(el).find((k) => k.startsWith('__reactInternalInstance$') || k.startsWith('__reactFiber$'));
+        if (!key) return false;
+        let fiber = el[key];
+        let depth = 0;
+        while (fiber && depth < 6) {
+            const props = fiber.memoizedProps || {};
+            const fn = props.onClick || props.onMouseDown || props.onPointerDown;
+            if (typeof fn === 'function') {
+                try {
+                    fn({
+                        type: 'click',
+                        preventDefault() {},
+                        stopPropagation() {},
+                        isDefaultPrevented: () => false,
+                        isPropagationStopped: () => false,
+                        bubbles: true,
+                        cancelable: true,
+                        currentTarget: el,
+                        target: el,
+                        nativeEvent: { isTrusted: true, stopPropagation() {}, preventDefault() {} }
+                    });
+                    return true;
+                } catch (e) {
+                    warn('reactClick 调用出错', e);
+                    return false;
+                }
+            }
+            fiber = fiber.return;
+            depth += 1;
+        }
+        return false;
+    }
+
+    /** 从徽章图片文件名尾部取等级：.../2_3_1_0_11.webp → 11 */
+    function badgeLevelFromSrc(src) {
+        const m = String(src || '').match(/_(\d+)\.webp(?:$|\?)/i);
+        return m ? Number(m[1]) : -1;
+    }
+
+    // ---------- 弹幕颜色（粉丝弹幕） ----------
+    const BARRAGE_RANKS = {
+        超粉Plus: 100,
+        超粉: 90,
+        Lv18: 80,
+        Lv14: 70,
+        Lv10: 60,
+        Lv6: 50,
+        Lv3: 40,
+        Lv1: 30
+    };
+
+    function barrageColorRank(label) {
+        const key = String(label || '').trim();
+        return Object.prototype.hasOwnProperty.call(BARRAGE_RANKS, key) ? BARRAGE_RANKS[key] : -1;
+    }
+
+    class FansBadge {
+        constructor(settings) {
+            this.settings = settings;
+            this.bound = false;
+            this.timers = [];
+            this.lastRoom = null;
+            this.host = null;
+            this.busy = false;
+            this.silentStyle = null;
+            this.hoverBound = false;
+        }
+
+        update(s) {
+            this.settings = s;
+            if (s.enableFansBadge === false && s.enableFansCheckIn === false) {
+                this.clearTimers();
+                this.silenceOff();
+            }
+        }
+
+        clearTimers() {
+            this.timers.forEach((t) => clearTimeout(t));
+            this.timers = [];
+        }
+
+        roomUid() {
+            const a = queryOne('#J_roomHeader a.host-pic, a.host-pic, a[href*="/video/u/"]');
+            const m = (a?.getAttribute?.('href') || '').match(/\/video\/u\/(\d+)/);
+            if (m) return m[1];
+            try {
+                const rd = unsafeWindow.TT_ROOM_DATA || {};
+                const v = rd.id || rd.channel || rd.profileRoom;
+                return v ? String(v) : '';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        hostInfo() {
+            if (this.host) return this.host;
+            const img = queryOne('#J_roomHeader a.host-pic img, a.host-pic img');
+            const name =
+                (img && img.getAttribute('alt')) ||
+                ((queryOne('.host-detail, .host-title')?.innerText || '').trim()) ||
+                '';
+            const avatar = img ? img.getAttribute('src') || '' : '';
+            const uid = this.roomUid();
+            this.host = uid ? { uid, nick: name, avatar } : null;
+            return this.host;
+        }
+
+        panel() {
+            return queryOne(SEL.fansPanel);
+        }
+
+        arm() {
+            this.clearTimers();
+            this.host = null;
+            this.lastRoom = this.roomUid();
+            if (!this.lastRoom) {
+                warn('fansbadge: 识别不到当前主播，跳过本轮');
+                return;
+            }
+            const room = this.lastRoom;
+            if (this.settings.enableFansBadge !== false) {
+                let tries = 0;
+                const attempt = async () => {
+                    if (this.roomUid() !== room) return;
+                    const wearOk = await this.wearBest();
+                    const colorOk = await this.applyBarrageColor();
+                    tries += 1;
+                    if (wearOk && colorOk) {
+                        log('fansbadge: 全部就绪', { 尝试次数: tries });
+                        return;
+                    }
+                    if (tries >= FANS_BADGE_MAX_TRIES) {
+                        warn('fansbadge: 重试到上限仍未就绪', { 尝试次数: tries, 佩戴: wearOk, 颜色: colorOk });
+                        return;
+                    }
+                    this.timers.push(setTimeout(attempt, FANS_BADGE_RETRY));
+                };
+                this.timers.push(setTimeout(attempt, FANS_BADGE_DELAY));
+            }
+            if (this.settings.enableFansCheckIn !== false) {
+                this.timers.push(
+                    setTimeout(() => {
+                        if (this.roomUid() === room) this.checkIn();
+                    }, FANS_CHECKIN_DELAY)
+                );
+            }
+            log('fansbadge: 已排程', {
+                room,
+                badge: this.settings.enableFansBadge,
+                checkin: this.settings.enableFansCheckIn
+            });
+        }
+
+        bind() {
+            if (this.bound) return;
+            this.bound = true;
+            this.bindHoverBridge();
+            this.silenceOn();
+            this.arm();
+
+            let n = 0;
+            const poll = setInterval(() => {
+                n += 1;
+                if (n > 90) return clearInterval(poll);
+                const k = this.roomUid();
+                if (k && k !== this.lastRoom) this.arm();
+            }, 4000);
+        }
+
+        waitPanel(timeout = 4000) {
+            return waitFor(() => this.panel(), { timeout, interval: 120, label: 'fanclub panel' })
+                .then(() => this.panel())
+                .catch(() => null);
+        }
+
+        // 面板默认就开着，找不到才算失败；挂 pointer-events:none 禁止交互
+        silenceOn() {
+            if (this.silentStyle) return;
+            const style = document.createElement('style');
+            style.id = 'hlo-fans-silent';
+            style.textContent =
+                '[class*="FanClubBd--"],[class*="FanClubBd"] > *' +
+                '{opacity:0 !important;pointer-events:none !important}';
+            (document.head || document.documentElement).appendChild(style);
+            this.silentStyle = style;
+        }
+
+        silenceOff() {
+            this.silentStyle?.remove();
+            this.silentStyle = null;
+        }
+
+        bindHoverBridge() {
+            if (this.hoverBound) return;
+            this.hoverBound = true;
+            const area = () => queryOne('.chat-host-pic') || queryOne('.chat-room__ft__chat');
+            document.addEventListener(
+                'mouseover',
+                (e) => {
+                    const a = area();
+                    if (a && (a === e.target || a.contains(e.target))) this.silenceOff();
+                },
+                true
+            );
+            document.addEventListener(
+                'mouseout',
+                (e) => {
+                    const a = area();
+                    if (!a || a.contains(e.relatedTarget)) return;
+                    this.silenceOn();
+                },
+                true
+            );
+        }
+
+        // 「打卡」/「已完成」直接对应站侧 lSignInFlag
+        findCheckinBtn() {
+            const hits = queryAll('a,button').filter((el) => {
+                const t = (el.innerText || '').trim();
+                if (!/^(打卡|已完成|已打卡)$/.test(t)) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 16 && r.height > 8 && r.height < 60;
+            });
+            return hits[0] || null;
+        }
+
+        async checkIn() {
+            if (this.busy) return;
+            this.busy = true;
+            this.silenceOn();
+            try {
+                const host = this.hostInfo();
+                if (!host) {
+                    warn('fansbadge: 拿不到主播信息');
+                    return;
+                }
+                if (!openFanClub(FANS_TAB_CLUB, host)) {
+                    warn('fansbadge: TT.event 不可用，无法打开粉丝团面板');
+                    return;
+                }
+                const panel = await this.waitPanel();
+                if (!panel) {
+                    warn('fansbadge: 粉丝团面板没打开');
+                    return;
+                }
+                const btn = await waitFor(() => this.findCheckinBtn(), {
+                    timeout: 4000,
+                    interval: 150,
+                    label: 'checkin btn'
+                })
+                    .then(() => this.findCheckinBtn())
+                    .catch(() => null);
+
+                if (!btn) {
+                    // 面板里没有打卡按钮 = 站侧没给本房间粉丝牌能力 = 没有粉丝牌
+                    warn('fansbadge: 面板里没有打卡按钮，跳过（本房间应无粉丝牌）');
+                    return;
+                }
+                const before = (btn.innerText || '').trim();
+                if (before !== '打卡') {
+                    log('fansbadge: 今日已打卡，跳过（站侧 lSignInFlag 已置位）', before);
+                    return;
+                }
+                if (!reactClick(btn)) {
+                    warn('fansbadge: 打卡按钮上没找到 React onClick，改用原生 click');
+                    btn.click();
+                }
+                await sleep(1200);
+                // 用 includes：按钮里包着图标，innerText 可能夹不可见字符
+                const after = (btn.innerText || '').trim();
+                if (/已完成|已打卡/.test(after)) log('fansbadge: 打卡成功', after);
+                else warn(`fansbadge: 点了打卡但按钮仍是「${after}」`);
+            } catch (e) {
+                warn('fansbadge: checkIn 出错', e);
+            } finally {
+                this.silenceOn();
+                this.busy = false;
+            }
+        }
+
+        readBadges(panel) {
+            const items = queryAll(SEL.fansBadgeItem, panel).filter((el) => {
+                const r = el.getBoundingClientRect();
+                return r.width > 20 && r.height > 10;
+            });
+            return items.map((el) => {
+                const floor = el.querySelector(SEL.fansBadgeImg);
+                const icon = el.querySelector('img[class*="Icon--"]');
+                const custom = el.querySelector(SEL.fansBadgeKind);
+                const cls = (custom?.className || '').toString();
+                return {
+                    el,
+                    level: badgeLevelFromSrc(floor?.getAttribute('src')),
+                    icon: (icon?.getAttribute('src') || '').slice(-24),
+                    sf: (cls.match(/sf-[a-z0-9]+--[A-Za-z0-9_]+/i) || [])[0] || null,
+                    selected: /(^|\s)selected(--|\s|$)/.test(el.className || '')
+                };
+            });
+        }
+
+        // .J_PortalChatPanelRoot 有多个实例，必须按标题「粉丝弹幕」认领
+        barragePanel() {
+            for (const root of queryAll(SEL.fansBarragePortal)) {
+                const head = root.querySelector(SEL.fansBarrageHead);
+                if (head && /粉丝弹幕/.test(head.textContent || '')) return root;
+            }
+            return null;
+        }
+
+        readBarrageColors(panel) {
+            return queryAll(SEL.fansBarrageItem, panel)
+                .map((el) => {
+                    const span = el.firstElementChild;
+                    if (!span) return null;
+                    const cls = String(span.className || '');
+                    const label = (span.textContent || '').trim();
+                    return {
+                        el,
+                        span,
+                        label,
+                        isDefault: /colorDefault--/.test(cls),
+                        locked: /lock--/.test(cls),
+                        selected: /selected--/.test(cls),
+                        rank: barrageColorRank(label)
+                    };
+                })
+                .filter(Boolean);
+        }
+
+        // 面板只在可见时渲染，靠派发 #J-room-chat-color 的 mouseenter 打开
+        async openBarragePanel(timeout = 5000) {
+            const trigger = queryOne(SEL.fansBarrageTrigger);
+            if (!trigger) {
+                warn('fansbadge: 找不到弹幕颜色按钮', SEL.fansBarrageTrigger);
+                return null;
+            }
+            let fired = 0;
+            let lastErr = null;
+            const hit = await waitFor(
+                () => {
+                    if (!this.barragePanel()) {
+                        fired += 1;
+                        try {
+                            fireMouse(trigger, 'mouseenter');
+                        } catch (e) {
+                            lastErr = e;
+                        }
+                    }
+                    return this.barragePanel();
+                },
+                { timeout, interval: 200, label: '粉丝弹幕面板' }
+            )
+                .then(() => this.barragePanel())
+                .catch(() => null);
+            if (!hit) {
+                // 把派发次数和异常带出来，否则只会看到一句「打不开」，没法定位
+                warn('fansbadge: 派发 mouseenter 后面板仍未出现', {
+                    派发次数: fired,
+                    异常: lastErr ? String(lastErr && lastErr.message ? lastErr.message : lastErr) : null
+                });
+            }
+            return hit;
+        }
+
+        closeBarragePanel(panel) {
+            const trigger = queryOne(SEL.fansBarrageTrigger);
+            panel?.style.removeProperty('opacity');
+            panel?.style.removeProperty('pointer-events');
+            try {
+                fireMouse(trigger, 'mouseleave');
+            } catch (e) {
+            }
+        }
+
+        // 排除未解锁(lock--)；站侧 customColor 是内存态，刷新即失效
+        async applyBarrageColor() {
+            let panel = null;
+            let ok = false;
+            try {
+                panel = await this.openBarragePanel();
+                if (!panel) {
+                    warn('fansbadge: 打不开「粉丝弹幕」面板');
+                    return false;
+                }
+                // 面板会真弹到屏幕上（实测 340x213，居中），期间必须藏好
+                panel.style.setProperty('opacity', '0', 'important');
+                panel.style.setProperty('pointer-events', 'none', 'important');
+
+                const rows = this.readBarrageColors(panel);
+                if (!rows.length) {
+                    warn('fansbadge: 粉丝弹幕面板里没有颜色条目');
+                    return false;
+                }
+                log(
+                    'fansbadge: 弹幕颜色列表',
+                    rows.map((r) => ({ label: r.label || '(不染色)', locked: r.locked, selected: r.selected }))
+                );
+
+                const usable = rows.filter((r) => r.rank > 0 && !r.locked);
+                const best = usable.reduce((acc, r) => (!acc || r.rank > acc.rank ? r : acc), null);
+                if (!best) {
+                    log('fansbadge: 本房间没有可用的弹幕颜色档', {
+                        locked: rows.filter((r) => r.locked).map((r) => r.label)
+                    });
+                    return true;
+                }
+                if (best.selected) {
+                    log('fansbadge: 弹幕颜色已是最高档', best.label);
+                    return true;
+                }
+                if (!reactClick(best.span)) {
+                    warn('fansbadge: 颜色条目上没有 React onClick，改用原生 click');
+                    best.span.click();
+                }
+                await sleep(1000);
+                // 必须在关面板之前校验：mouseleave 会把内容卸载掉
+                const after = this.readBarrageColors(panel).find((r) => r.selected);
+                if (after && after.label === best.label) {
+                    log('fansbadge: 已切到最高档弹幕颜色', best.label);
+                    ok = true;
+                } else {
+                    warn('fansbadge: 点了颜色但选中态没落到目标档位', {
+                        want: best.label,
+                        now: after ? after.label || '(不染色)' : null
+                    });
+                }
+            } catch (e) {
+                warn('fansbadge: applyBarrageColor 出错', e);
+            } finally {
+                this.closeBarragePanel(panel);
+            }
+            return ok;
+        }
+
+        async wearBest() {
+            if (this.busy) return false;
+            this.busy = true;
+            this.silenceOn();
+            let ok = false;
+            try {
+                const host = this.hostInfo();
+                if (!host) {
+                    warn('fansbadge: 拿不到主播信息');
+                    return false;
+                }
+                if (!openFanClub(FANS_TAB_BADGE, host)) {
+                    warn('fansbadge: TT.event 不可用，无法打开「我的徽章」');
+                    return false;
+                }
+                const panel = await this.waitPanel();
+                if (!panel) {
+                    warn('fansbadge: 粉丝团面板没打开');
+                    return false;
+                }
+                await sleep(400);
+                let badges = await waitFor(() => {
+                    const list = this.readBadges(panel);
+                    return list.some((b) => b.level > -1) ? list : false;
+                }, { timeout: 3000, interval: 300, label: '徽章等级可读' })
+                    .then(() => this.readBadges(panel))
+                    .catch(() => this.readBadges(panel));
+                if (!badges.length) {
+                    log('fansbadge: 本房间没有粉丝牌，跳过');
+                    return true;
+                }
+                log('fansbadge: 徽章列表', badges.map((b) => ({ level: b.level, selected: b.selected, sf: b.sf, icon: b.icon })));
+
+                const usable = badges.filter((b) => b.level > -1);
+                const best = usable.reduce((acc, b) => (!acc || b.level > acc.level ? b : acc), null);
+                if (!best) {
+                    warn('fansbadge: 徽章等级读不出来，按现状不再重试', {
+                        条目数: badges.length,
+                        已佩戴: badges.some((b) => b.selected),
+                        详情: badges.map((b) => ({ sf: b.sf, icon: b.icon }))
+                    });
+                    return true;
+                }
+                if (best.selected) {
+                    log('fansbadge: 已是最高等级，无需佩戴', best.level);
+                    return true;
+                }
+                if (!reactClick(best.el)) {
+                    warn('fansbadge: 徽章条目上没找到 React onClick，改用原生 click');
+                    best.el.click();
+                }
+                await sleep(900);
+                const now = this.readBadges(panel).find((b) => b.selected);
+                if (now && now.level === best.level) {
+                    log('fansbadge: 已佩戴最高等级', best.level);
+                    ok = true;
+                } else {
+                    warn('fansbadge: 点了佩戴但 selected 没落到目标徽章', { want: best.level, now: now ? now.level : null });
+                }
+            } catch (e) {
+                warn('fansbadge: wearBest 出错', e);
+            } finally {
+                this.silenceOn();
+                this.busy = false;
+            }
+            return ok;
+        }
+    }
     // ---------- bootstrap（分层延迟，减轻进房头几秒卡顿） ----------
     function main() {
-        // 样式与设置很轻，立即做
         injectStyles();
         const settings = loadSettings();
 
         const optimizer = new PlayerOptimizer(settings);
         const plusOne = new ScreenPlusOne(settings);
         const history = new DanmakuHistory(settings);
+        const fansBadge = new FansBadge(settings);
 
         const ui = new SettingsUI(optimizer, settings, (next) => {
             plusOne.update(next);
             history.update(next);
             optimizer.updateSettings(next);
+            fansBadge.update(next);
         });
 
-        // 核心路径尽快；次要功能仍 idle
         optimizer.startWatchdog();
         scheduleIdle(() => ui.watchButton(), 1200);
         scheduleIdle(() => history.bind(), 3500);
         scheduleIdle(() => plusOne.bind(), 4000);
+        scheduleIdle(() => fansBadge.bind(), 5000);
 
         log('initialized', settings);
     }
