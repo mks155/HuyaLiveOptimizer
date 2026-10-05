@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.2.1
+// @version      2.2.2
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -20,13 +20,17 @@
     'use strict';
 
     const NS = 'HuyaLiveOptimizer';
-    const FALLBACK_VERSION = '2.2.1';
     const VERSION = (() => {
         try {
-            if (typeof GM_info !== 'undefined' && GM_info?.scriptMeta?.version) return String(GM_info.scriptMeta.version);
+            const meta = (typeof GM_info !== 'undefined' && (GM_info.scriptMeta || GM_info.script?.meta)) || null;
+            const v = meta?.version || meta?.json?.version;
+            if (v) return String(v);
+            const src = (typeof GM_info !== 'undefined' && GM_info.script?.code) || document.currentScript?.textContent || '';
+            const m = String(src).match(/@version\s+(\S+)/);
+            if (m) return m[1];
         } catch (e) {
         }
-        return FALLBACK_VERSION;
+        return '0.0.0';
     })();
     const STORAGE_KEY = 'huya_optimizer';
     const MAX_HISTORY = 50;
@@ -111,7 +115,7 @@
             try {
                 const raw = GM_getValue(key, null);
                 if (raw == null) return fallback;
-                return typeof raw === 'string' ? JSON.parse(raw) : raw;
+                return raw;
             } catch (e) {
                 warn('store.get 失败', e);
                 return fallback;
@@ -119,7 +123,7 @@
         },
         set(key, value) {
             try {
-                GM_setValue(key, JSON.stringify(value));
+                GM_setValue(key, value);
                 return true;
             } catch (e) {
                 warn('store.set 失败', e);
