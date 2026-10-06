@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.2.2
+// @version      2.3.1
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -55,6 +55,7 @@
     const FANS_CHECKIN_DELAY = 30000;
     const FANS_BADGE_RETRY = 6000;
     const FANS_BADGE_MAX_TRIES = 12;
+    const FANS_CAP_MISS_LIMIT = 3;
 
     const THEME_MODES = ['auto', 'light', 'dark'];
     const THEME_LABEL = { auto: '跟随浏览器', light: '白天', dark: '夜晚' };
@@ -87,14 +88,15 @@
         sendBtn: '#msg_send_bt',
         // 粉丝团面板：靠 TT.event.emit('FAN_CLUB_OPEN', tab, host) 打开，不是点出来的
         fansPanel: '[class*="FanClubBd--"]',
-        fansBadgeItem: '[class*="BadgeItem--"]',
-        fansBadgeImg: 'img[class*="Floor--"]',
-        fansBadgeKind: '[class*="CustomBadge--"]',
-        // 弹幕颜色面板只在可见时渲染；同一 portal 下有多个面板，要按标题认领
+        // 弹幕颜色面板有两套并存：
+        // 粉丝团房间是 React portal（标题「粉丝弹幕」，靠 onMouseEnter 触发）；
+        // 赛事房间没有粉丝团，走普通 DOM 的 #J-room-club-color（标题「彩色弹幕」，靠 jQuery mouseover 触发）。
         fansBarragePortal: '.J_PortalChatPanelRoot',
         fansBarrageHead: '[class*="PanelHd--"]',
         fansBarrageItem: '[class*="item--"]',
-        // 触发按钮：给它的原生 mouseenter 派发合成事件即可渲染出面板
+        fansClubColorPanel: '#J-room-club-color',
+        fansClubColorList: '#J-color-list-club > li',
+        // 触发按钮：两套实现监听的事件不同，mouseover 和 mouseenter 都要派
         fansBarrageTrigger: '#J-room-chat-color',
         inputCandidates: [
             '#pub_msg_input',
@@ -181,6 +183,93 @@
     const log = (...a) => console.log(`[${NS}]`, ...a);
     const warn = (...a) => console.warn(`[${NS}]`, ...a);
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    function copyText(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        let ok = false;
+        try {
+            ok = document.execCommand('copy');
+        } catch (e) {
+            ok = false;
+        }
+        ta.remove();
+        if (!ok) {
+            try {
+                navigator.clipboard.writeText(text);
+                ok = true;
+            } catch (e) {
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    // ---------- 举报：走官方视频弹幕黑条 ----------
+    // 官方在 #danmudiv 上用 jQuery 委托监听 mousedown 且 which===3（右键，不是 contextmenu），
+    // 命中后弹 #player-danmu-report 黑条（复制/举报）；uid/nick/msg 都存在元素的 jQuery data 上，
+    // 点黑条里的「举报」才 trigger('reportMessage', {uid,nick,msg})。
+    // 所以不自造 payload，只把官方黑条唤出来点它那一项 —— uid 是真的，弹窗也是官方的。
+    // 黑条定位读的是元素的 css('top') 与 transform，不看事件坐标，弹幕飘走也不影响。
+    const DANMU_BAR = '#player-danmu-report';
+
+    // 黑条只对这三类节点生效
+    function isOfficialDanmu(el) {
+        return !!el.closest('#danmudiv, #danmudiv2') &&
+            !!el.closest('.danmu-item, .danmu-tv-item-big, .danmu-tv-item-small');
+    }
+
+    // 页面 realm 直接 new MouseEvent 并冒泡，官方是 jQuery 委托监听才能收到。
+    // 不复用 fireMouse：它兜底分支会把 bubbles/cancelable 写死成 false，失败还是静默的。
+    function pageMouse(el, type, init) {
+        const view = el.ownerDocument.defaultView;
+        const ev = new view.MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view,
+            clientX: 0,
+            clientY: 0,
+            ...init,
+        });
+        el.dispatchEvent(ev);
+        return ev;
+    }
+
+    function centerOf(el) {
+        const b = el.getBoundingClientRect();
+        return {
+            clientX: Math.round(b.left + b.width / 2),
+            clientY: Math.round(b.top + b.height / 2),
+        };
+    }
+
+    async function reportDanmu(item) {
+        const bar = queryOne(DANMU_BAR);
+        if (!bar) return { ok: false, reason: '官方黑条不存在' };
+        if (!item || !isOfficialDanmu(item)) return { ok: false, reason: '这不是官方弹幕节点' };
+        // 右键由官方按 which===3 判定，button:2 会被 jQuery 归一化成 3
+        pageMouse(item, 'mousedown', { ...centerOf(item), button: 2, buttons: 2 });
+        await sleep(120);
+        if (getComputedStyle(bar).display === 'none') return { ok: false, reason: '黑条没弹出' };
+        const label = ((bar.querySelector('span') || {}).textContent || '').trim();
+        const btn = [...bar.querySelectorAll('span')].find((e) => (e.textContent || '').trim() === '举报');
+        if (!btn) {
+            bar.style.display = 'none';
+            // 房管看到的是「禁言」，官方没给举报
+            return { ok: false, reason: label === '禁言' ? '你是房管，官方只给禁言' : '黑条里没有举报' };
+        }
+        const at = centerOf(btn);
+        pageMouse(btn, 'mousedown', { ...at, button: 0, buttons: 1 });
+        pageMouse(btn, 'mouseup', { ...at, button: 0, buttons: 0 });
+        pageMouse(btn, 'click', { ...at, button: 0, detail: 1 });
+        await sleep(150);
+        return { ok: true, via: 'danmu-bar' };
+    }
 
     function waitFor(fn, { timeout = 15000, interval = 250, label = 'cond' } = {}) {
         return new Promise((resolve, reject) => {
@@ -360,6 +449,15 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
   line-height:26px;cursor:pointer;box-shadow:0 1px 6px rgba(0,0,0,.4);white-space:nowrap
 }
 #hlo-danmu-freeze .hlo-plus1:hover{filter:brightness(1.08)}
+#hlo-danmu-freeze .hlo-dmbtn{
+  flex:0 0 auto;min-width:40px;height:26px;padding:0 10px;border:none;border-radius:13px;
+  background:#4a4a52;color:#eee;font-size:12px;font-weight:700;
+  line-height:26px;cursor:pointer;white-space:nowrap;
+  box-shadow:0 1px 6px rgba(0,0,0,.4)
+}
+#hlo-danmu-freeze .hlo-dmbtn:hover{filter:brightness(1.12)}
+#hlo-danmu-freeze .hlo-dmbtn-report{background:linear-gradient(180deg,#ff9a1f,#f80);color:#111}
+#hlo-danmu-freeze .hlo-dmbtn[disabled]{opacity:.55;cursor:default;filter:none}
 `;
         document.head.appendChild(style);
     }
@@ -484,11 +582,37 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return el ? (el.textContent || '').trim() : '';
         }
 
+        // 列表上带 on 的那项才是真选中的；标签 .player-videotype-cur 在播放器没起播时会滞后
+        selectedQualityText() {
+            const on = queryOne('.player-videotype-list li.on');
+            if (!on) return '';
+            const $ = page$();
+            if ($) {
+                try {
+                    const d = $(on).data('data') || {};
+                    if (d.sDisplayName) return String(d.sDisplayName).trim();
+                } catch (e) {
+                }
+            }
+            return (on.textContent || '').replace(/请先登录|请先登陆/g, '').trim();
+        }
+
+        // 起播前清晰度列表是占位的（只有「超清|高清」这种），点了也不生效，必须等 video 真的有数据
+        isPlayerReady() {
+            const v = queryOne(['#player-container video', '#player-vdieobox video', 'video']);
+            return !!v && (v.readyState >= 2 || v.videoWidth > 0);
+        }
+
         isCurrentQuality(target) {
-            return PlayerOptimizer.normalize(this.currentQualityText()) === PlayerOptimizer.normalize(target);
+            const n = PlayerOptimizer.normalize(target);
+            return PlayerOptimizer.normalize(this.currentQualityText()) === n ||
+                PlayerOptimizer.normalize(this.selectedQualityText()) === n;
         }
 
         static nameOf($, li) {
+            // 未解锁时渲染文本会带「请先登录」后缀，sDisplayName 才是干净的档位名
+            const d = (li && $(li).data('data')) || {};
+            if (d.sDisplayName) return String(d.sDisplayName).trim();
             const $span = $(li).find('span').first();
             return ($span.length ? $span.text() : $(li).text()).trim();
         }
@@ -534,7 +658,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 });
                 return true;
             } catch (e) {
-                warn(`quality timeout cur=${this.currentQualityText()} want=${target}`);
+                warn(`quality timeout cur=${this.selectedQualityText() || '-'} label=${this.currentQualityText() || '-'} want=${target}`);
                 return false;
             }
         }
@@ -606,6 +730,12 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     interval: 500,
                     label: 'theater btn'
                 });
+                // 没起播就切清晰度必然失败，占位列表点了也不认
+                await waitFor(() => this.isPlayerReady(), {
+                    timeout: 20000,
+                    interval: 500,
+                    label: 'player ready'
+                }).catch(() => warn('player not streaming, still trying'));
                 await waitFor(() => queryAll(SEL.qualityList).length > 0, {
                     timeout: 5000,
                     interval: 500,
@@ -624,7 +754,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 await this.enterTheater();
 
                 log('done', {
-                    quality: this.currentQualityText(),
+                    quality: this.selectedQualityText() || this.currentQualityText(),
                     theater: this.theaterDone,
                     qualityDone: this.qualityDone
                 });
@@ -641,7 +771,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             let n = 0;
             const t = setInterval(() => {
                 n += 1;
-                if (n > 3) {
+                // 播放器起播可能要十几秒，重试窗口给到 ~40s，别 3 下就放弃
+                if (n > 20) {
                     clearInterval(t);
                     return;
                 }
@@ -810,8 +941,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 <label class="row"><input type="checkbox" id="hlo-theater" ${this.settings.autoTheater ? 'checked' : ''}/> 自动进入观影模式</label>
                 <label class="row"><input type="checkbox" id="hlo-plus1" ${this.settings.enableScreenPlusOne !== false ? 'checked' : ''}/> 画面弹幕悬浮 +1</label>
                 <label class="row"><input type="checkbox" id="hlo-history" ${this.settings.enableDanmakuHistory !== false ? 'checked' : ''}/> 弹幕输入框上下键历史</label>
-                <label class="row"><input type="checkbox" id="hlo-fans-badge" ${this.settings.enableFansBadge !== false ? 'checked' : ''}/> 自动佩戴粉丝牌和弹幕颜色（15 秒）</label>
-                <label class="row"><input type="checkbox" id="hlo-fans-checkin" ${this.settings.enableFansCheckIn !== false ? 'checked' : ''}/> 有粉丝牌则自动打卡（30 秒）</label>
+                <label class="row"><input type="checkbox" id="hlo-fans-badge" ${this.settings.enableFansBadge !== false ? 'checked' : ''}/> 自动切最高档弹幕颜色（15 秒）</label>
+                <label class="row"><input type="checkbox" id="hlo-fans-checkin" ${this.settings.enableFansCheckIn !== false ? 'checked' : ''}/> 有粉丝团则自动打卡（30 秒）</label>
                 <div class="actions">
                     <button type="button" class="btn-ghost" id="hlo-close">关闭</button>
                     <button type="button" class="btn-primary" id="hlo-save">保存并应用</button>
@@ -919,6 +1050,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             this.watchTimer = 0;
             this.lastPoint = null;
             this.barRect = null;
+            this.holdUntil = 0;
         }
 
         update(settings) {
@@ -927,7 +1059,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
 
         enabled() {
-            return this.settings.enableScreenPlusOne !== false;
+            // 举报时官方黑条接管，短时间内别再弹冻结条去盖它
+            return this.settings.enableScreenPlusOne !== false && Date.now() >= this.holdUntil;
         }
 
         inBar(p) {
@@ -1003,6 +1136,63 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 if (this.enabled()) sendDanmaku(value);
             });
             wrap.appendChild(btn);
+
+            // 原始文案只认一次：连点时若拿当前文字当「原文」，
+                // 第二个定时器会把「已复制」还原回去，按钮就永久卡在提示语上。
+                const flash = (el, txt, ms) => {
+                    const origin = el.dataset.hloLabel || el.textContent;
+                    el.dataset.hloLabel = origin;
+                    el.textContent = txt;
+                    el.disabled = true;
+                    clearTimeout(el._hloFlash);
+                    el._hloFlash = setTimeout(() => {
+                        el.textContent = origin;
+                        el.disabled = false;
+                    }, ms);
+                };
+
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'hlo-dmbtn';
+            copyBtn.textContent = '复制';
+            copyBtn.title = '复制这条弹幕';
+            copyBtn.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            copyBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                flash(copyBtn, copyText(extractDanmuText(this.ghost) || text) ? '已复制' : '复制失败', 1200);
+            });
+            wrap.appendChild(copyBtn);
+
+            const reportBtn = document.createElement('button');
+            reportBtn.type = 'button';
+            reportBtn.className = 'hlo-dmbtn hlo-dmbtn-report';
+            reportBtn.textContent = '举报';
+            reportBtn.title = '举报这条弹幕';
+            reportBtn.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            reportBtn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                reportBtn.disabled = true;
+                const item = this.ghost;
+                const r = await reportDanmu(item);
+                if (r.ok) {
+                    // 官方黑条已经接管，撤掉冻结条免得盖住它，并按住别马上又冒出来
+                    log('举报入口已交给官方', r.via);
+                    this.clear();
+                    this.holdUntil = Date.now() + 2000;
+                } else {
+                    warn('举报失败：' + r.reason);
+                    flash(reportBtn, '举报失败', 1400);
+                }
+            });
+            wrap.appendChild(reportBtn);
 
             document.body.appendChild(wrap);
 
@@ -1271,7 +1461,6 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
 // ---------- 粉丝牌：自动佩戴 + 自动打卡 ----------
     const FANS_TAB_CLUB = 0;
-    const FANS_TAB_BADGE = 1;
 
     function openFanClub(tab, host) {
         try {
@@ -1338,13 +1527,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         return false;
     }
 
-    /** 从徽章图片文件名尾部取等级：.../2_3_1_0_11.webp → 11 */
-    function badgeLevelFromSrc(src) {
-        const m = String(src || '').match(/_(\d+)\.webp(?:$|\?)/i);
-        return m ? Number(m[1]) : -1;
-    }
-
-    // ---------- 弹幕颜色（粉丝弹幕） ----------
+    // ---------- 弹幕颜色 ----------
     const BARRAGE_RANKS = {
         超粉Plus: 100,
         超粉: 90,
@@ -1371,13 +1554,63 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             this.busy = false;
             this.silentStyle = null;
             this.hoverBound = false;
+            // 有些房间（如赛事官方直播间）没有粉丝团，只有勋章/VIP 的彩色弹幕。
+            // 这里按房间记忆能力：null=未知，探明为 false 后本房间不再尝试也不刷警告。
+            this.capRoom = null;
+            this.cap = { barrage: null, clubPanel: null };
+            this.capMiss = { barrage: 0, clubPanel: 0 };
+        }
+
+        caps() {
+            const room = this.roomUid();
+            if (this.capRoom !== room) {
+                this.capRoom = room;
+                this.cap = { barrage: null, clubPanel: null };
+                this.capMiss = { barrage: 0, clubPanel: 0 };
+            }
+            return this.cap;
+        }
+
+        hasCap(key) {
+            return this.caps()[key] !== false;
+        }
+
+        // 返回 true = 本房间没这个功能，调用方应安静收手；false = 还会再试
+        capFailed(key, warnMsg, giveUpMsg) {
+            const c = this.caps();
+            if (c[key] === false) return true;
+            this.capMiss[key] = (this.capMiss[key] || 0) + 1;
+            if (this.capMiss[key] < FANS_CAP_MISS_LIMIT) {
+                // 只在第一次提醒，之后安静重试，否则会刷屏
+                if (this.capMiss[key] === 1) warn(warnMsg);
+                return false;
+            }
+            c[key] = false;
+            log(giveUpMsg, this.capSummary());
+            return true;
+        }
+
+        capOk(key) {
+            this.caps()[key] = true;
+            this.capMiss[key] = 0;
+        }
+
+        capSummary() {
+            const c = this.caps();
+            const s = (v) => (v === false ? '无' : v ? '有' : '未知');
+            return { 弹幕颜色: s(c.barrage), 粉丝团面板: s(c.clubPanel) };
         }
 
         update(s) {
+            const wasOff = this.settings.enableFansBadge === false && this.settings.enableFansCheckIn === false;
             this.settings = s;
-            if (s.enableFansBadge === false && s.enableFansCheckIn === false) {
+            const nowOff = s.enableFansBadge === false && s.enableFansCheckIn === false;
+            if (nowOff) {
                 this.clearTimers();
                 this.silenceOff();
+            } else if (wasOff && this.bound) {
+                // 之前全关掉了、timer 已被清空，重新勾上必须重新排程，否则要刷新页面才恢复
+                this.arm();
             }
         }
 
@@ -1429,15 +1662,18 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 let tries = 0;
                 const attempt = async () => {
                     if (this.roomUid() !== room) return;
-                    const wearOk = await this.wearBest();
-                    const colorOk = await this.applyBarrageColor();
+                    if (!this.hasCap('barrage')) {
+                        log('fansbadge: 本房间没有弹幕颜色功能，跳过', this.capSummary());
+                        return;
+                    }
                     tries += 1;
-                    if (wearOk && colorOk) {
-                        log('fansbadge: 全部就绪', { 尝试次数: tries });
+                    // 达成就收手，不重跑 —— 之前每轮都重切一次，用户看到颜色被反复设置
+                    if (await this.applyBarrageColor()) {
+                        log('fansbadge: 弹幕颜色已就绪', { 尝试次数: tries, ...this.capSummary() });
                         return;
                     }
                     if (tries >= FANS_BADGE_MAX_TRIES) {
-                        warn('fansbadge: 重试到上限仍未就绪', { 尝试次数: tries, 佩戴: wearOk, 颜色: colorOk });
+                        warn('fansbadge: 重试到上限仍未就绪', { 尝试次数: tries, ...this.capSummary() });
                         return;
                     }
                     this.timers.push(setTimeout(attempt, FANS_BADGE_RETRY));
@@ -1447,7 +1683,15 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             if (this.settings.enableFansCheckIn !== false) {
                 this.timers.push(
                     setTimeout(() => {
-                        if (this.roomUid() === room) this.checkIn();
+                        if (this.roomUid() !== room) return;
+                        // 打卡按钮在粉丝团面板里。赛事房间没有粉丝团，
+                        // 而 FAN_CLUB_OPEN 在那种房间会把「赛事VIP」广告面板顶出来，
+                        // 所以只在确认过是粉丝团房间时才发这个事件。
+                        if (this.caps().clubPanel === false) {
+                            log('fansbadge: 本房间没有粉丝团面板，跳过打卡（不发 FAN_CLUB_OPEN）');
+                            return;
+                        }
+                        this.checkIn();
                     }, FANS_CHECKIN_DELAY)
                 );
             }
@@ -1532,10 +1776,20 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
 
         async checkIn() {
-            if (this.busy) return;
+            if (this.busy) {
+                // 不出声就等于今天的打卡悄悄没了，要留痕
+                warn('fansbadge: 打卡与其它操作撞上了，本次跳过');
+                return;
+            }
             this.busy = true;
             this.silenceOn();
             try {
+                // 赛事房间没有粉丝团，FAN_CLUB_OPEN 在那里会把「赛事VIP」广告面板顶出来，
+                // 所以只在弹幕颜色那步已经确认是粉丝团房间时才发
+                if (this.caps().clubPanel === false) {
+                    log('fansbadge: 本房间没有粉丝团面板，跳过打卡（不发 FAN_CLUB_OPEN）');
+                    return;
+                }
                 const host = this.hostInfo();
                 if (!host) {
                     warn('fansbadge: 拿不到主播信息');
@@ -1547,9 +1801,14 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 }
                 const panel = await this.waitPanel();
                 if (!panel) {
-                    warn('fansbadge: 粉丝团面板没打开');
+                    this.capFailed(
+                        'clubPanel',
+                        'fansbadge: 粉丝团面板没打开，跳过打卡',
+                        'fansbadge: 本房间打不开粉丝团面板，跳过打卡'
+                    );
                     return;
                 }
+                this.capOk('clubPanel');
                 const btn = await waitFor(() => this.findCheckinBtn(), {
                     timeout: 4000,
                     interval: 150,
@@ -1585,28 +1844,14 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             }
         }
 
-        readBadges(panel) {
-            const items = queryAll(SEL.fansBadgeItem, panel).filter((el) => {
-                const r = el.getBoundingClientRect();
-                return r.width > 20 && r.height > 10;
-            });
-            return items.map((el) => {
-                const floor = el.querySelector(SEL.fansBadgeImg);
-                const icon = el.querySelector('img[class*="Icon--"]');
-                const custom = el.querySelector(SEL.fansBadgeKind);
-                const cls = (custom?.className || '').toString();
-                return {
-                    el,
-                    level: badgeLevelFromSrc(floor?.getAttribute('src')),
-                    icon: (icon?.getAttribute('src') || '').slice(-24),
-                    sf: (cls.match(/sf-[a-z0-9]+--[A-Za-z0-9_]+/i) || [])[0] || null,
-                    selected: /(^|\s)selected(--|\s|$)/.test(el.className || '')
-                };
-            });
-        }
-
-        // .J_PortalChatPanelRoot 有多个实例，必须按标题「粉丝弹幕」认领
+        // 两套面板都认。React portal 那个收起时高度是 0 但内容还挂在 DOM 里，
+        // 所以不能按尺寸过滤（加了会把正常房间判成没有）；普通 DOM 那套要按尺寸认。
         barragePanel() {
+            const plain = queryOne(SEL.fansClubColorPanel);
+            if (plain) {
+                const b = plain.getBoundingClientRect();
+                if (b.width > 20 && b.height > 20) return plain;
+            }
             for (const root of queryAll(SEL.fansBarragePortal)) {
                 const head = root.querySelector(SEL.fansBarrageHead);
                 if (head && /粉丝弹幕/.test(head.textContent || '')) return root;
@@ -1614,7 +1859,24 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return null;
         }
 
+        // 赛事房间那套是 <li class="color-item[ locked][ current]">，没有文案，
+        // 只能按 DOM 顺序定档位（白=不染色排第一，后面由弱到强），锁定看 locked。
         readBarrageColors(panel) {
+            if (panel.id === 'J-room-club-color') {
+                return queryAll(SEL.fansClubColorList, panel).map((el, i) => {
+                    const cls = String(el.className || '');
+                    const hex = ((el.getAttribute('style') || '').match(/background-color:\s*([^;]+)/i) || [])[1];
+                    return {
+                        el,
+                        span: el,
+                        label: (hex || '').trim(),
+                        isDefault: /color-item1/.test(cls),
+                        locked: /(^|\s)locked(\s|$)/.test(cls),
+                        selected: /(^|\s)current(\s|$)/.test(cls),
+                        rank: /color-item1/.test(cls) ? 0 : i
+                    };
+                });
+            }
             return queryAll(SEL.fansBarrageItem, panel)
                 .map((el) => {
                     const span = el.firstElementChild;
@@ -1634,47 +1896,72 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 .filter(Boolean);
         }
 
-        // 面板只在可见时渲染，靠派发 #J-room-chat-color 的 mouseenter 打开
-        async openBarragePanel(timeout = 5000) {
+        // 面板只在可见时渲染。两套实现监听的事件不一样：
+        // React 的 onMouseEnter 只认真实 mouseenter，赛事房间 jQuery 绑的只认真实 mouseover，
+        // 所以两个都派，谁都不落下。
+        pokeBarrageTrigger(trigger) {
+            const b = trigger.getBoundingClientRect();
+            const at = {
+                bubbles: true,
+                cancelable: true,
+                clientX: Math.round(b.left + b.width / 2),
+                clientY: Math.round(b.top + b.height / 2)
+            };
+            fireMouse(trigger, 'mouseover', at);
+            fireMouse(trigger, 'mouseenter', at);
+        }
+
+        // 有些房间压根没有这功能，所以只探一下就够，别反复派发刷警告。
+        // 面板「打开」的标准是能读出颜色条目：赛事那套收起时 ul 是空的，
+        // React 那套收起时高度是 0 但条目已挂上，两种都得等条目真的在。
+        async openBarragePanel(timeout = 2000) {
             const trigger = queryOne(SEL.fansBarrageTrigger);
-            if (!trigger) {
-                warn('fansbadge: 找不到弹幕颜色按钮', SEL.fansBarrageTrigger);
-                return null;
-            }
+            if (!trigger) return { panel: null, fired: 0, err: 'no-trigger' };
             let fired = 0;
-            let lastErr = null;
+            let err = null;
+            const ready = () => {
+                const p = this.barragePanel();
+                return p && this.readBarrageColors(p).length ? p : null;
+            };
             const hit = await waitFor(
                 () => {
-                    if (!this.barragePanel()) {
+                    if (!ready()) {
                         fired += 1;
                         try {
-                            fireMouse(trigger, 'mouseenter');
+                            this.pokeBarrageTrigger(trigger);
                         } catch (e) {
-                            lastErr = e;
+                            err = e;
                         }
                     }
-                    return this.barragePanel();
+                    return ready();
                 },
-                { timeout, interval: 200, label: '粉丝弹幕面板' }
+                { timeout, interval: 200, label: '弹幕颜色面板' }
             )
-                .then(() => this.barragePanel())
+                .then(ready)
                 .catch(() => null);
-            if (!hit) {
-                // 把派发次数和异常带出来，否则只会看到一句「打不开」，没法定位
-                warn('fansbadge: 派发 mouseenter 后面板仍未出现', {
-                    派发次数: fired,
-                    异常: lastErr ? String(lastErr && lastErr.message ? lastErr.message : lastErr) : null
-                });
-            }
-            return hit;
+            return { panel: hit, fired, err: err ? String(err.message || err) : null };
         }
 
         closeBarragePanel(panel) {
             const trigger = queryOne(SEL.fansBarrageTrigger);
             panel?.style.removeProperty('opacity');
             panel?.style.removeProperty('pointer-events');
+            // 赛事那套是自己把 display 置成 block 的，站侧的 mouseleave 收不干净就手动收
+            if (panel && panel.id === SEL.fansClubColorPanel.slice(1)) {
+                panel.style.display = 'none';
+            }
             try {
-                fireMouse(trigger, 'mouseleave');
+                const b = trigger && trigger.getBoundingClientRect();
+                const at = b
+                    ? {
+                          bubbles: true,
+                          cancelable: true,
+                          clientX: Math.round(b.left + b.width / 2),
+                          clientY: Math.round(b.top + b.height / 2)
+                      }
+                    : {};
+                fireMouse(trigger, 'mouseout', at);
+                fireMouse(trigger, 'mouseleave', at);
             } catch (e) {
             }
         }
@@ -1684,18 +1971,30 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             let panel = null;
             let ok = false;
             try {
-                panel = await this.openBarragePanel();
+                const probe = await this.openBarragePanel();
+                panel = probe.panel;
                 if (!panel) {
-                    warn('fansbadge: 打不开「粉丝弹幕」面板');
-                    return false;
+                    return this.capFailed(
+                        'barrage',
+                        `fansbadge: 打不开弹幕颜色面板（已派发 ${probe.fired} 次${
+                            probe.err ? '，异常 ' + probe.err : ''
+                        }）`,
+                        'fansbadge: 本房间没有弹幕颜色功能，跳过弹幕颜色'
+                    );
                 }
+                this.capOk('barrage');
+                // 面板类型就是「本房间有没有粉丝团」的判据：
+                // React 的「粉丝弹幕」面板只有粉丝团房间才有；赛事房间是普通 DOM 的「彩色弹幕」，
+                // 那种房间没有粉丝团，去了只会把赛事VIP广告面板顶出来。
+                this.caps().clubPanel = panel.id === 'J-room-club-color' ? false : null;
+                if (this.caps().clubPanel === null) this.capOk('clubPanel');
                 // 面板会真弹到屏幕上（实测 340x213，居中），期间必须藏好
                 panel.style.setProperty('opacity', '0', 'important');
                 panel.style.setProperty('pointer-events', 'none', 'important');
 
                 const rows = this.readBarrageColors(panel);
                 if (!rows.length) {
-                    warn('fansbadge: 粉丝弹幕面板里没有颜色条目');
+                    warn('fansbadge: 弹幕颜色面板里没有颜色条目');
                     return false;
                 }
                 log(
@@ -1707,102 +2006,33 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 const best = usable.reduce((acc, r) => (!acc || r.rank > acc.rank ? r : acc), null);
                 if (!best) {
                     log('fansbadge: 本房间没有可用的弹幕颜色档', {
-                        locked: rows.filter((r) => r.locked).map((r) => r.label)
+                        锁定: rows.filter((r) => r.locked).map((r) => r.label)
                     });
                     return true;
                 }
                 if (best.selected) {
-                    log('fansbadge: 弹幕颜色已是最高档', best.label);
+                    log('fansbadge: 弹幕颜色已是最高档', best.label || `第${best.rank}档`);
                     return true;
                 }
-                if (!reactClick(best.span)) {
-                    warn('fansbadge: 颜色条目上没有 React onClick，改用原生 click');
-                    best.span.click();
-                }
+                // 赛事那套是普通 DOM，本来就没有 React fiber，走原生 click 属正常
+                if (!reactClick(best.span)) best.span.click();
                 await sleep(1000);
-                // 必须在关面板之前校验：mouseleave 会把内容卸载掉
+                // 必须在关面板之前校验：mouseout 会把内容卸载掉
                 const after = this.readBarrageColors(panel).find((r) => r.selected);
-                if (after && after.label === best.label) {
-                    log('fansbadge: 已切到最高档弹幕颜色', best.label);
+                // 比 rank 不比 label：赛事那套的 label 是色值，可能重复
+                if (after && after.rank === best.rank) {
+                    log('fansbadge: 已切到最高档弹幕颜色', best.label || `第${best.rank}档`);
                     ok = true;
                 } else {
                     warn('fansbadge: 点了颜色但选中态没落到目标档位', {
-                        want: best.label,
-                        now: after ? after.label || '(不染色)' : null
+                        想要: best.label || `第${best.rank}档`,
+                        现在: after ? after.label || '(不染色)' : null
                     });
                 }
             } catch (e) {
                 warn('fansbadge: applyBarrageColor 出错', e);
             } finally {
                 this.closeBarragePanel(panel);
-            }
-            return ok;
-        }
-
-        async wearBest() {
-            if (this.busy) return false;
-            this.busy = true;
-            this.silenceOn();
-            let ok = false;
-            try {
-                const host = this.hostInfo();
-                if (!host) {
-                    warn('fansbadge: 拿不到主播信息');
-                    return false;
-                }
-                if (!openFanClub(FANS_TAB_BADGE, host)) {
-                    warn('fansbadge: TT.event 不可用，无法打开「我的徽章」');
-                    return false;
-                }
-                const panel = await this.waitPanel();
-                if (!panel) {
-                    warn('fansbadge: 粉丝团面板没打开');
-                    return false;
-                }
-                await sleep(400);
-                let badges = await waitFor(() => {
-                    const list = this.readBadges(panel);
-                    return list.some((b) => b.level > -1) ? list : false;
-                }, { timeout: 3000, interval: 300, label: '徽章等级可读' })
-                    .then(() => this.readBadges(panel))
-                    .catch(() => this.readBadges(panel));
-                if (!badges.length) {
-                    log('fansbadge: 本房间没有粉丝牌，跳过');
-                    return true;
-                }
-                log('fansbadge: 徽章列表', badges.map((b) => ({ level: b.level, selected: b.selected, sf: b.sf, icon: b.icon })));
-
-                const usable = badges.filter((b) => b.level > -1);
-                const best = usable.reduce((acc, b) => (!acc || b.level > acc.level ? b : acc), null);
-                if (!best) {
-                    warn('fansbadge: 徽章等级读不出来，按现状不再重试', {
-                        条目数: badges.length,
-                        已佩戴: badges.some((b) => b.selected),
-                        详情: badges.map((b) => ({ sf: b.sf, icon: b.icon }))
-                    });
-                    return true;
-                }
-                if (best.selected) {
-                    log('fansbadge: 已是最高等级，无需佩戴', best.level);
-                    return true;
-                }
-                if (!reactClick(best.el)) {
-                    warn('fansbadge: 徽章条目上没找到 React onClick，改用原生 click');
-                    best.el.click();
-                }
-                await sleep(900);
-                const now = this.readBadges(panel).find((b) => b.selected);
-                if (now && now.level === best.level) {
-                    log('fansbadge: 已佩戴最高等级', best.level);
-                    ok = true;
-                } else {
-                    warn('fansbadge: 点了佩戴但 selected 没落到目标徽章', { want: best.level, now: now ? now.level : null });
-                }
-            } catch (e) {
-                warn('fansbadge: wearBest 出错', e);
-            } finally {
-                this.silenceOn();
-                this.busy = false;
             }
             return ok;
         }
