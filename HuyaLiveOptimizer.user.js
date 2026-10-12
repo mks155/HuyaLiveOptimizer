@@ -57,6 +57,13 @@
     const FANS_BADGE_MAX_TRIES = 12;
     const FANS_CAP_MISS_LIMIT = 3;
 
+    // 播放器起播可能很慢，一轮 attempt 自己就要十几秒，
+    // 所以重试按墙钟时间算，不按 watchdog 的 tick 数算
+    const PLAYER_RETRY_BUDGET = 60000;
+    const PLAYER_RETRY_GAP = 2500;
+    // 落定后在这两个时间点复核：影院切换理论上可能重建播放器把画质打回默认
+    const PLAYER_SETTLE_DELAYS = [4000, 12000];
+
     const THEME_MODES = ['auto', 'light', 'dark'];
     const THEME_LABEL = { auto: '跟随浏览器', light: '白天', dark: '夜晚' };
     const THEME_ICON = {
@@ -546,6 +553,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             this.theaterDone = false;
             this.qualityDone = false;
             this.running = false;
+            this.targetText = '';
+            this.settleTimers = [];
         }
 
         isValidQuality(q) {
@@ -674,6 +683,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
             const { el, text } = this.resolveTarget($, $list);
             if (!el || !text) throw new Error('target quality missing');
+            // 记下目标：站点若把画质改回去，落定复核要拿它跟当前实际档位比，
+            // 而不是信 qualityDone 这个标志位（标志位不会自己变回 false）
+            this.targetText = text;
 
             if (this.isCurrentQuality(text)) {
                 this.qualityDone = true;
@@ -704,60 +716,95 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             const $ = page$();
             if (!$) return false;
 
-            const $btn = $(SEL.theaterBtn);
-            if (!$btn.length) return false;
-            if ($btn.hasClass(SEL.theaterOn)) {
+            const btn = await waitFor(() => queryOne(SEL.theaterBtn), {
+                timeout: 4000,
+                interval: 300,
+                label: 'theater btn'
+            })
+                .then(() => queryOne(SEL.theaterBtn))
+                .catch(() => null);
+            if (!btn) return false;
+            if (this.isTheaterOn()) {
                 this.theaterDone = true;
                 return true;
             }
 
-            $btn.click();
-            await sleep(350);
-            this.theaterDone = this.isTheaterOn();
+            if ($) $(btn).click();
+            else btn.click();
+            // 切影院要重建播放器，等固定 350ms 常常判成没切上，这里等真生效
+            this.theaterDone = await waitFor(() => this.isTheaterOn(), {
+                timeout: 6000,
+                interval: 250,
+                label: 'theater on'
+            })
+                .then(() => true)
+                .catch(() => false);
             if (this.theaterDone) log('theater ok');
             else warn('theater click did not stick');
             return this.theaterDone;
+        }
+
+        // 两样是否真的都到位了。画质要比当前实际档位，不能只看 qualityDone 标志位，
+        // 站点把画质改回去时那个标志位仍是 true。
+        settled() {
+            const theaterOk = !this.settings.autoTheater || this.isTheaterOn();
+            const qualityOk = this.targetText ? this.isCurrentQuality(this.targetText) : this.qualityDone;
+            return theaterOk && qualityOk;
+        }
+
+        // 一轮尝试：等就绪 → 解锁 → 切清晰度 → 进影院
+        async attempt() {
+            if (!page$()) return false;
+            // 没起播就切清晰度必然失败，起播前清晰度列表只是占位的
+            if (!this.isPlayerReady()) {
+                await waitFor(() => this.isPlayerReady(), {
+                    timeout: 15000,
+                    interval: 500,
+                    label: 'player ready'
+                }).catch(() => null);
+            }
+            await waitFor(() => queryAll(SEL.qualityList).length > 0, {
+                timeout: 4000,
+                interval: 400,
+                label: 'quality list'
+            }).catch(() => null);
+
+            this.unlockQuality();
+            try {
+                await this.switchQuality();
+            } catch (e) {
+                warn('switchQuality', e);
+            }
+            await sleep(600);
+            await this.enterTheater();
+            return this.settled();
         }
 
         async run() {
             if (this.running) return;
             this.running = true;
             try {
-                await waitForJQuery(15000);
+                // 超时不该把整个 run 带走，交给下面的循环继续重试
+                await waitForJQuery(15000).catch(() => warn('jQuery not ready, 继续重试'));
 
-                await waitFor(() => queryOne(SEL.theaterBtn), {
-                    timeout: 15000,
-                    interval: 500,
-                    label: 'theater btn'
-                });
-                // 没起播就切清晰度必然失败，占位列表点了也不认
-                await waitFor(() => this.isPlayerReady(), {
-                    timeout: 20000,
-                    interval: 500,
-                    label: 'player ready'
-                }).catch(() => warn('player not streaming, still trying'));
-                await waitFor(() => queryAll(SEL.qualityList).length > 0, {
-                    timeout: 5000,
-                    interval: 500,
-                    label: 'quality list'
-                }).catch(() => null);
-
-                this.unlockQuality();
-
-                try {
-                    await this.switchQuality();
-                } catch (e) {
-                    warn('switchQuality', e);
-                }
-
-                await sleep(800);
-                await this.enterTheater();
+                // 重试必须在 run 内部按墙钟时间做。之前是靠 watchdog 的 20 个 tick，
+                // 而一轮 attempt 自己就要十几秒，tick 在真正重试之前就被耗光了：
+                // 播放器起得慢时第一轮还在跑，定时器就已经 clearInterval 放弃。
+                const until = Date.now() + PLAYER_RETRY_BUDGET;
+                let rounds = 0;
+                do {
+                    rounds += 1;
+                    if (await this.attempt()) break;
+                    await sleep(PLAYER_RETRY_GAP);
+                } while (Date.now() < until);
 
                 log('done', {
+                    轮数: rounds,
                     quality: this.selectedQualityText() || this.currentQualityText(),
                     theater: this.theaterDone,
                     qualityDone: this.qualityDone
                 });
+                this.scheduleSettleCheck();
             } catch (e) {
                 warn('run error', e);
             } finally {
@@ -765,29 +812,40 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             }
         }
 
+        // 影院切换理论上可能重建播放器把画质打回默认，落定后再核几轮，掉了就补一轮
+        scheduleSettleCheck() {
+            this.clearSettleTimers();
+            for (const d of PLAYER_SETTLE_DELAYS) {
+                const id = setTimeout(() => {
+                    this.settleTimers.splice(this.settleTimers.indexOf(id), 1);
+                    if (this.running) return;
+                    if (!this.settled()) {
+                        warn('settle check: 画质或影院没保住，补一轮', {
+                            当前画质: this.selectedQualityText() || this.currentQualityText(),
+                            目标画质: this.targetText || '-',
+                            影院: this.isTheaterOn()
+                        });
+                        this.run();
+                    }
+                }, d);
+                this.settleTimers.push(id);
+            }
+        }
+
+        clearSettleTimers() {
+            this.settleTimers.forEach((id) => clearTimeout(id));
+            this.settleTimers = [];
+        }
+
         startWatchdog() {
-            setTimeout(() => this.run(), 1000);
+            setTimeout(() => this.run(), 800);
 
-            let n = 0;
-            const t = setInterval(() => {
-                n += 1;
-                // 播放器起播可能要十几秒，重试窗口给到 ~40s，别 3 下就放弃
-                if (n > 20) {
-                    clearInterval(t);
-                    return;
-                }
-                if (this.running) return;
-                const theaterOk = !this.settings.autoTheater || this.theaterDone || this.isTheaterOn();
-                if (theaterOk && this.qualityDone) {
-                    clearInterval(t);
-                    return;
-                }
-                this.run();
-            }, 2000);
-
+            // 只负责换房间后重来；轮询式重试已经收进 run() 内部按墙钟时间做了
             const onNav = () => {
                 this.theaterDone = false;
                 this.qualityDone = false;
+                this.targetText = '';
+                this.clearSettleTimers();
                 setTimeout(() => this.run(), 900);
             };
             window.addEventListener('popstate', onNav);
@@ -796,7 +854,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             let p = 0;
             const nav = setInterval(() => {
                 p += 1;
-                if (p > 40) {
+                if (p > 75) {
                     clearInterval(nav);
                     return;
                 }
