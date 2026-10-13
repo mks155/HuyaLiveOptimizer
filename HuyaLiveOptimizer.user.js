@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.3.2
+// @version      2.3.3
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -11,7 +11,7 @@
 // @grant        unsafeWindow
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @license      MIT
+// @license      Apache-2.0
 // @noframes
 // @run-at       document-idle
 // ==/UserScript==
@@ -22,13 +22,16 @@
     const NS = 'HuyaLiveOptimizer';
     const VERSION = (() => {
         try {
-            const meta = (typeof GM_info !== 'undefined' && (GM_info.scriptMeta || GM_info.script?.meta)) || null;
+            const script = (typeof GM_info !== 'undefined' && GM_info.script) || null;
+            if (script && script.version) return String(script.version);
+            const meta = (typeof GM_info !== 'undefined' && (GM_info.scriptMeta || script?.meta)) || null;
             const v = meta?.version || meta?.json?.version;
             if (v) return String(v);
-            const src = (typeof GM_info !== 'undefined' && GM_info.script?.code) || document.currentScript?.textContent || '';
+            const src = script?.code || document.currentScript?.textContent || '';
             const m = String(src).match(/@version\s+(\S+)/);
             if (m) return m[1];
         } catch (e) {
+            console.warn(`[${NS}]`, '解析版本号失败，回退 0.0.0', e);
         }
         return '0.0.0';
     })();
@@ -199,7 +202,7 @@
         document.body.appendChild(ta);
         ta.select();
         ta.setSelectionRange(0, ta.value.length);
-        let ok = false;
+        let ok;
         try {
             ok = document.execCommand('copy');
         } catch (e) {
@@ -709,6 +712,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
         async enterTheater() {
             if (!this.settings.autoTheater) return true;
+            // 自动进观影只在进入页面的最初几秒负责一次：进成就置 theaterDone，
+            // 之后（落定复核 / 换画质补跑）都不再点它，用户手动退出也就不会被拽回去
+            if (this.theaterDone) return true;
             if (this.isTheaterOn()) {
                 this.theaterDone = true;
                 return true;
@@ -747,7 +753,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         // 两样是否真的都到位了。画质要比当前实际档位，不能只看 qualityDone 标志位，
         // 站点把画质改回去时那个标志位仍是 true。
         settled() {
-            const theaterOk = !this.settings.autoTheater || this.isTheaterOn();
+            // 观影只看 theaterDone：进过一次就算完成，之后不再维持；画质要比当前实际档位
+            const theaterOk = !this.settings.autoTheater || this.theaterDone;
             const qualityOk = this.targetText ? this.isCurrentQuality(this.targetText) : this.qualityDone;
             return theaterOk && qualityOk;
         }

@@ -10,7 +10,7 @@
   </p>
   <p>
     <a href="https://github.com/mks155/HuyaLiveOptimizer"><img src="https://img.shields.io/github/stars/mks155/HuyaLiveOptimizer?style=social" alt="GitHub Stars"></a>
-    <a href="https://github.com/mks155/HuyaLiveOptimizer/blob/main/LICENSE"><img src="https://img.shields.io/github/license/mks155/HuyaLiveOptimizer" alt="MIT License"></a>
+    <a href="https://github.com/mks155/HuyaLiveOptimizer/blob/main/LICENSE"><img src="https://img.shields.io/github/license/mks155/HuyaLiveOptimizer" alt="Apache-2.0 License"></a>
   </p>
 </div>
 
@@ -40,7 +40,7 @@
 
 ## 安装
 
-1. 装一个脚本管理器，**首选 [脚本猫 ScriptCat](https://scriptcat.org/)**，也兼容 [Tampermonkey](https://www.tampermonkey.net/) 和 [Violentmonkey](https://violentmonkey.github.io/)
+1. 装一个脚本管理器，**首选 [Tampermonkey](https://www.tampermonkey.net/)**，也兼容 [脚本猫 ScriptCat](https://scriptcat.org/) 和 [Violentmonkey](https://violentmonkey.github.io/)
 2. 从[脚本猫安装页](https://scriptcat.org/zh-CN/script-show-page/8254)一键装，或手动导入本仓库的 `HuyaLiveOptimizer.user.js`
 3. 打开任意 `huya.com` 直播间，进房后一切自动生效
 
@@ -69,4 +69,4 @@
 
 ## License
 
-[MIT](https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/LICENSE) © 2026 [mks155](https://mks155.github.io)
+[Apache-2.0](https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/LICENSE) © 2025 [mks155](https://mks155.github.io)
