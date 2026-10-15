@@ -22,7 +22,7 @@
 - [GitHub 仓库](https://github.com/mks155/HuyaLiveOptimizer) — 欢迎 [Star](https://github.com/mks155/HuyaLiveOptimizer)，反馈请提 [Issue](https://github.com/mks155/HuyaLiveOptimizer/issues)
 - **[脚本猫 ScriptCat](https://scriptcat.org/zh-CN/script-show-page/8254)** — 首选推荐
 - [Greasy Fork 安装页](https://greasyfork.org/zh-CN/scripts/595617-huyaliveoptimizer-%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8)
-- [OpenUserJS 安装页](https://openuserjs.org/scripts/mks155/%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8_HuyaLiveOptimizer)
+- ~~[OpenUserJS 安装页](https://openuserjs.org/scripts/mks155/%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8_HuyaLiveOptimizer)~~
 
 ## 功能清单
 
