@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.3.3
+// @version      2.3.4
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -66,6 +66,8 @@
     const PLAYER_RETRY_GAP = 2500;
     // 落定后在这两个时间点复核：影院切换理论上可能重建播放器把画质打回默认
     const PLAYER_SETTLE_DELAYS = [4000, 12000];
+    // 落定复核最多补几轮，防止「复核→重跑→再复核」无限循环
+    const PLAYER_SETTLE_MAX_FIX = 2;
 
     const THEME_MODES = ['auto', 'light', 'dark'];
     const THEME_LABEL = { auto: '跟随浏览器', light: '白天', dark: '夜晚' };
@@ -558,6 +560,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             this.running = false;
             this.targetText = '';
             this.settleTimers = [];
+            this.settleFixes = 0;
+            this.warnedNoVideo = false;
         }
 
         isValidQuality(q) {
@@ -606,7 +610,11 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 } catch (e) {
                 }
             }
-            return (on.textContent || '').replace(/请先登录|请先登陆/g, '').trim();
+            // 后缀实测有三种：「请先登录」「请先登陆」「扫码即享」（赛事/蓝光档用后者）。
+// 正常都靠 sDisplayName 绕开，这里兜底也要剥干净，否则和标签比不上就算成没切上去。
+            return (on.textContent || '')
+                .replace(/请先登录|请先登陆|扫码即享/g, '')
+                .trim();
         }
 
         // 起播前清晰度列表是占位的（只有「超清|高清」这种），点了也不生效，必须等 video 真的有数据
@@ -615,10 +623,37 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return !!v && (v.readyState >= 2 || v.videoWidth > 0);
         }
 
+        // 页面里一个 video 都没有，说明是电台之类不推视频的房间，
+        // 再等多久都没用，必须认出来直接跳过，否则每轮白等 15s
+        hasVideoElement() {
+            return !!queryOne(['#player-container video', '#player-vdieobox video', 'video']);
+        }
+
+        // 占位列表的每一项都没有站侧数据（实测 data('data') 是 {}），
+        // 真实列表每项都带 sDisplayName / status。拿占位列表去解析目标只会选到「超清」，
+        // 所以在拿到真实列表之前一律视为不可用。
+        realQualityList() {
+            const $ = page$();
+            if (!$) return null;
+            const $list = $(SEL.qualityList);
+            if (!$list.length) return null;
+            let real = false;
+            $list.each((_, li) => {
+                const d = $(li).data('data');
+                if (d && (d.sDisplayName != null || d.status != null)) real = true;
+            });
+            return real ? $list : null;
+        }
+
+        // 两个信号打架（标签=高清 而 li.on=超清）就是起播前的占位状态，
+        // 这时任何一边都不能当准 —— 之前用 || 合并会在这里误判成「已经是超清了」，
+        // 于是连点都不点就收工，最高画质永远上不去。
         isCurrentQuality(target) {
             const n = PlayerOptimizer.normalize(target);
-            return PlayerOptimizer.normalize(this.currentQualityText()) === n ||
-                PlayerOptimizer.normalize(this.selectedQualityText()) === n;
+            const label = PlayerOptimizer.normalize(this.currentQualityText());
+            const selected = PlayerOptimizer.normalize(this.selectedQualityText());
+            if (label && selected && label !== selected) return false;
+            return label === n || selected === n;
         }
 
         static nameOf($, li) {
@@ -679,8 +714,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             const $ = page$();
             if (!$) throw new Error('jQuery not ready');
 
-            const $list = $(SEL.qualityList);
-            if (!$list.length) throw new Error('quality list missing');
+            // 只认真实列表：占位列表里没有蓝光/4K，解析出来的目标必然是「超清」
+            const $list = this.realQualityList();
+            if (!$list) throw new Error('quality list not ready');
 
             this.unlockQuality();
 
@@ -764,14 +800,20 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             if (!page$()) return false;
             // 没起播就切清晰度必然失败，起播前清晰度列表只是占位的
             if (!this.isPlayerReady()) {
-                await waitFor(() => this.isPlayerReady(), {
-                    timeout: 15000,
-                    interval: 500,
-                    label: 'player ready'
-                }).catch(() => null);
+                if (this.hasVideoElement()) {
+                    await waitFor(() => this.isPlayerReady(), {
+                        timeout: 15000,
+                        interval: 500,
+                        label: 'player ready'
+                    }).catch(() => null);
+                } else if (!this.warnedNoVideo) {
+                    this.warnedNoVideo = true;
+                    warn('player not streaming：页面里没有 video 元素，可能不是视频直播间，跳过清晰度与影院');
+                }
             }
-            await waitFor(() => queryAll(SEL.qualityList).length > 0, {
-                timeout: 4000,
+            // 等真实清晰度列表：起播前那份只有「超清|高清」，拿去解析目标只会锁死在超清
+            await waitFor(() => this.realQualityList(), {
+                timeout: 8000,
                 interval: 400,
                 label: 'quality list'
             }).catch(() => null);
@@ -819,19 +861,25 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             }
         }
 
-        // 影院切换理论上可能重建播放器把画质打回默认，落定后再核几轮，掉了就补一轮
+        // 影院切换理论上可能重建播放器把画质打回默认，落定后再核几轮，掉了就补一轮。
+        // run() 结尾还会再排一次复核，不封顶就变成「复核→重跑→再复核」的无限链。
         scheduleSettleCheck() {
             this.clearSettleTimers();
+            if (this.settleFixes >= PLAYER_SETTLE_MAX_FIX) return;
             for (const d of PLAYER_SETTLE_DELAYS) {
                 const id = setTimeout(() => {
                     this.settleTimers.splice(this.settleTimers.indexOf(id), 1);
                     if (this.running) return;
                     if (!this.settled()) {
-                        warn('settle check: 画质或影院没保住，补一轮', {
-                            当前画质: this.selectedQualityText() || this.currentQualityText(),
-                            目标画质: this.targetText || '-',
-                            影院: this.isTheaterOn()
-                        });
+                        this.settleFixes += 1;
+                        warn(
+                            `settle check：画质或影院没保住，补一轮（${this.settleFixes}/${PLAYER_SETTLE_MAX_FIX}）`,
+                            {
+                                当前画质: this.selectedQualityText() || this.currentQualityText(),
+                                目标画质: this.targetText || '-',
+                                影院: this.isTheaterOn()
+                            }
+                        );
                         this.run();
                     }
                 }, d);
@@ -852,6 +900,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 this.theaterDone = false;
                 this.qualityDone = false;
                 this.targetText = '';
+                this.settleFixes = 0;
+                this.warnedNoVideo = false;
                 this.clearSettleTimers();
                 setTimeout(() => this.run(), 900);
             };
