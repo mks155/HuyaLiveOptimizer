@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.5.1
+// @version      2.5.2
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -391,7 +391,7 @@
        选择器刻意压低特异性：虎牙的 class 名多为 hash 化的（Panel--xxx 那种），
        撞名的概率低；配合 html.hlo-dark 前缀已足够压过普通类规则。 */
     const SITE_DARK_CSS = `
-html.hlo-dark{color-scheme:dark}
+html.hlo-dark{scrollbar-color:#4a4d57 #1b1d22;scrollbar-width:thin}
 html.hlo-dark body{background:#15161a!important;color:#ddd!important}
 html.hlo-dark ::selection{background:#f80;color:#111}
 
@@ -471,7 +471,7 @@ html.hlo-dark [class*="activity-icon-box"]{background:#2a2d36!important}
 /* 输入控件与链接 */
 html.hlo-dark input,
 html.hlo-dark textarea,
-html.hlo-dark select{background:#23262d!important;color:#ddd!important;border-color:#3a3d46!important}
+html.hlo-dark select{background:#23262d!important;color:#ddd!important;border-color:#3a3d46!important;color-scheme:dark}
 html.hlo-dark a{color:#7fb2ff!important}
 html.hlo-dark a:hover{color:#a5c8ff!important}
     `;
