@@ -17,6 +17,11 @@
       <stop offset="100%" stop-color="#00FF88" />
     </linearGradient>
 
+    <linearGradient id="techCyanGear" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00CCE4" />
+      <stop offset="100%" stop-color="#00E47A" />
+    </linearGradient>
+
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.5" />
     </filter>
@@ -47,7 +52,7 @@
     />
 
     <g transform="translate(402 108) rotate(18) scale(1.18)">
-      <g fill="url(#techCyan)">
+      <g fill="url(#techCyanGear)">
         <rect x="-7" y="-37" width="14" height="17" rx="5" />
         <rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(45)" />
         <rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(90)" />
@@ -117,15 +122,15 @@
 
   <g filter="url(#shadow)">
     <path
-      d="M 186 182 C 186 122, 326 122, 326 182 C 326 268, 296 342, 256 424 C 216 342, 186 268, 186 182 Z"
+      d="M 168 170 C 172 100, 340 100, 344 170 C 347 245, 334 306, 256 394 C 178 306, 165 245, 168 170 Z"
       fill="url(#huyaYellow)"
       stroke="#4A2E15"
-      stroke-width="14"
+      stroke-width="16"
       stroke-linejoin="round"
     />
 
     <path
-      d="M 216 196 Q 214 268, 242 346"
+      d="M 202 178 Q 198 246, 228 314"
       fill="none"
       stroke="#FFFFFF"
       stroke-width="10"
@@ -134,7 +139,7 @@
     />
 
     <path
-      d="M 234 226 L 292 262 L 234 298 Z"
+      d="M 232 210 L 290 244 L 232 278 Z"
       fill="#4A2E15"
       stroke="#4A2E15"
       stroke-width="17"

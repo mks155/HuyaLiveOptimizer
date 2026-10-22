@@ -20,7 +20,7 @@
 
 - [作者主页](https://mks155.github.io/projects/userscripts/index.html) — 查看作者其他脚本
 - [GitHub 仓库](https://github.com/mks155/HuyaLiveOptimizer) — 欢迎 [Star](https://github.com/mks155/HuyaLiveOptimizer)，反馈请提 [Issue](https://github.com/mks155/HuyaLiveOptimizer/issues)
-- **[脚本猫 ScriptCat](https://scriptcat.org/zh-CN/script-show-page/8254)** — 首选推荐
+- **[ScriptCat 安装页](https://scriptcat.org/zh-CN/script-show-page/8254)** — 首选推荐
 - [Greasy Fork 安装页](https://greasyfork.org/zh-CN/scripts/595617-huyaliveoptimizer-%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8)
 - ~~[OpenUserJS 安装页](https://openuserjs.org/scripts/mks155/%E8%99%8E%E7%89%99%E7%9B%B4%E6%92%AD%E4%BC%98%E5%8C%96%E5%99%A8_HuyaLiveOptimizer)~~
 
@@ -32,7 +32,7 @@
 - **画面弹幕 +1**：鼠标移到视频弹幕上，一键发同款（鼠标移开自动复原）
 - **发送历史**：弹幕输入框按 <kbd>↑</kbd> / <kbd>↓</kbd> 快速找回刚才发过的内容
 - **自动切弹幕颜色**：进房 15 秒后，按徽章等级自动把**弹幕颜色**切到能用的最高档
-- **自动打卡**：进房 30 秒后，自动签到**名下全部粉丝团**，不只是当前房间
+- **自动打卡**：进房 30 秒后，自动签到**名下全部粉丝团**
 - **整站暗色配色**：一键把整个虎牙页面切成暗色
 
 ## 安装
@@ -48,11 +48,6 @@
 | 选项 | 说明 |
 |------|------|
 | 默认画质（全站生效） | 最高画质（默认），或固定 4K / 2K / 蓝光50M / 30M / 20M / 15M / 10M / 8M / 4M / 超清 / 流畅 |
-| 自动进入观影模式 | 默认开启 |
-| 画面弹幕悬浮 +1 复读 | 默认开启 |
-| 弹幕输入框上下键翻历史 | 默认开启 |
-| 自动切最高档弹幕颜色 | 默认开启，进房 15 秒后执行 |
-| 自动打卡名下全部粉丝团 | 默认开启，进房 30 秒后执行 |
 | 整站配色 | 点面板**右上角**的图标在「跟随浏览器 / 白天 / 夜晚」间循环，**影响整个虎牙页面** |
 
 改完点右侧 **保存并应用** 即可。

@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.5.2
+// @version      2.5.4
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -11,6 +11,8 @@
 // @grant        unsafeWindow
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_getResourceText
+// @resource     icon https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
 // @license      Apache-2.0
 // @noframes
 // @run-at       document-idle
@@ -19,23 +21,37 @@
 (function () {
     'use strict';
 
-    const NS = 'HuyaLiveOptimizer';
-    const VERSION = (() => {
+    // 顶层只取引用不解析；解析推迟到打开设置面板时
+    const SELF_SRC = (document.currentScript && document.currentScript.textContent) || '';
+    const META = (typeof GM_info !== 'undefined' && GM_info.script) || {};
+
+    /** 版本号与图标的唯一来源：TM 给 GM_info，其余引擎读自身源码 */
+    function meta(key) {
+        if (key in META) return META[key] || '';
+        const m = SELF_SRC && new RegExp('^[ \\t]*//[ \\t]*@' + key + '[ \\t]+(.+?)[ \\t]*$', 'm').exec(SELF_SRC);
+        return m ? m[1] : '';
+    }
+
+    /**
+     * 设置按钮图标。@icon 指向的 raw.githubusercontent.com 被虎牙 CSP img-src 拦下，
+     * 改用 @resource 取 SVG 源码转成 data: URI。
+     */
+    function optimizerIconImg() {
+        let svg = '';
         try {
-            const script = (typeof GM_info !== 'undefined' && GM_info.script) || null;
-            if (script && script.version) return String(script.version);
-            const meta = (typeof GM_info !== 'undefined' && (GM_info.scriptMeta || script?.meta)) || null;
-            const v = meta?.version || meta?.json?.version;
-            if (v) return String(v);
-            const src = script?.code || document.currentScript?.textContent || '';
-            const m = String(src).match(/@version\s+(\S+)/);
-            if (m) return m[1];
+            svg = (typeof GM_getResourceText === 'function' && GM_getResourceText('icon')) || '';
         } catch (e) {
-            console.warn(`[${NS}]`, '解析版本号失败，回退 0.0.0', e);
         }
-        return '0.0.0';
-    })();
-    const STORAGE_KEY = 'huya_optimizer';
+        if (!svg) {
+            const url = meta('icon');
+            return url ? `<img src="${escapeHtml(url)}" alt="">` : '';
+        }
+        const src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        return `<img src="${escapeHtml(src)}" alt="">`;
+    }
+
+    // 存储键即日志前缀；沿用旧键名，改了会丢用户已有设置
+    const NS = 'huya_optimizer';
     const MAX_HISTORY = 20;
 
     /** 全站画质档位（高 → 低）。默认最高；用户选的档房间没有则回退最高。 */
@@ -54,21 +70,18 @@
     ];
     const QUALITY_AUTO = '';
 
-    // 全局重试次数：所有需要重试的地方都用这一个值
     const MAX_TRIES = 3;
 
     const FANS_BADGE_DELAY = 15000;
     const FANS_CHECKIN_DELAY = 30000;
     const FANS_BADGE_RETRY = 6000;
 
-    // 播放器起播可能很慢，一轮 attempt 自己就要十几秒，
-    // 所以除了 MAX_TRIES 还留一个墙钟兜底，不靠 watchdog 的 tick 数算
+    // 单轮 attempt 可长达十几秒，MAX_TRIES 之外另留墙钟兜底
     const PLAYER_RETRY_BUDGET = 60000;
     const PLAYER_RETRY_GAP = 2500;
-    // 落定后在这两个时间点复核画质：站侧可能在起播过程中改回默认档。
-    // 实测影院切换不再重建播放器（进出各 3 次画质都没掉），所以复核只看画质。
+    // 落定后在这两个时间点复核画质（站侧起播过程中会改回默认档）
     const PLAYER_SETTLE_DELAYS = [4000, 12000];
-    // 落定复核最多补几轮，防止「复核→重跑→再复核」无限循环
+    // 复核补跑上限，防「复核→重跑→再复核」死循环
     const PLAYER_SETTLE_MAX_FIX = 2;
 
     const THEME_MODES = ['auto', 'light', 'dark'];
@@ -100,15 +113,14 @@
         danmuWrap: '#danmuwrap, #player-danmu-wrap, .danmu-wrap',
         danmuItem: ['.danmu-item', '.player-danmu-item'],
         sendBtn: '#msg_send_bt',
-        // 弹幕颜色面板有两套并存：
-        // 粉丝团房间是 React portal（标题「粉丝弹幕」，靠 onMouseEnter 触发）；
-        // 赛事房间没有粉丝团，走普通 DOM 的 #J-room-club-color（标题「彩色弹幕」，靠 jQuery mouseover 触发）。
+        // 弹幕颜色面板两套并存：粉丝团房间是 React portal（onMouseEnter）；
+        // 赛事房间走 DOM 的 #J-room-club-color（jQuery mouseover）
         fansBarragePortal: '.J_PortalChatPanelRoot',
         fansBarrageHead: '[class*="PanelHd--"]',
         fansBarrageItem: '[class*="item--"]',
         fansClubColorPanel: '#J-room-club-color',
         fansClubColorList: '#J-color-list-club > li',
-        // 触发按钮：两套实现监听的事件不同，mouseover 和 mouseenter 都要派
+        // 两套实现监听的事件不同，mouseover 与 mouseenter 都要派
         fansBarrageTrigger: '#J-room-chat-color',
         inputCandidates: [
             '#pub_msg_input',
@@ -147,13 +159,13 @@
     };
 
     function loadStore() {
-        const saved = store.get(STORAGE_KEY, null);
+        const saved = store.get(NS, null);
         return saved && typeof saved === 'object' ? saved : {};
     }
 
     function saveStore(patch) {
         const next = Object.assign(loadStore(), patch);
-        store.set(STORAGE_KEY, next);
+        store.set(NS, next);
         return next;
     }
 
@@ -223,11 +235,9 @@
     }
 
     // ---------- 举报：走官方视频弹幕黑条 ----------
-    // 官方在 #danmudiv 上用 jQuery 委托监听 mousedown 且 which===3（右键，不是 contextmenu），
-    // 命中后弹 #player-danmu-report 黑条（复制/举报）；uid/nick/msg 都存在元素的 jQuery data 上，
-    // 点黑条里的「举报」才 trigger('reportMessage', {uid,nick,msg})。
-    // 所以不自造 payload，只把官方黑条唤出来点它那一项 —— uid 是真的，弹窗也是官方的。
-    // 黑条定位读的是元素的 css('top') 与 transform，不看事件坐标，弹幕飘走也不影响。
+    // 官方在 #danmudiv 上监听 mousedown 且 which===3（右键，非 contextmenu）后弹
+    // #player-danmu-report 黑条；uid/nick/msg 存在元素的 jQuery data 上。
+    // 只唤出官方黑条点它那一项，不自造 payload。
     const DANMU_BAR = '#player-danmu-report';
 
     // 黑条只对这三类节点生效
@@ -236,8 +246,7 @@
             !!el.closest('.danmu-item, .danmu-tv-item-big, .danmu-tv-item-small');
     }
 
-    // 页面 realm 直接 new MouseEvent 并冒泡，官方是 jQuery 委托监听才能收到。
-    // 不复用 fireMouse：它兜底分支会把 bubbles/cancelable 写死成 false，失败还是静默的。
+    // 必须在页面 realm new MouseEvent 并冒泡；不能复用 fireMouse（兜底把 bubbles/cancelable 写死 false，失败静默）
     function pageMouse(el, type, init) {
         const view = el.ownerDocument.defaultView;
         const ev = new view.MouseEvent(type, {
@@ -264,7 +273,7 @@
         const bar = queryOne(DANMU_BAR);
         if (!bar) return { ok: false, reason: '官方黑条不存在' };
         if (!item || !isOfficialDanmu(item)) return { ok: false, reason: '这不是官方弹幕节点' };
-        // 右键由官方按 which===3 判定，button:2 会被 jQuery 归一化成 3
+            // 官方按 which===3 判右键；button:2 会被 jQuery 归一化成 3
         pageMouse(item, 'mousedown', { ...centerOf(item), button: 2, buttons: 2 });
         await sleep(120);
         if (getComputedStyle(bar).display === 'none') return { ok: false, reason: '黑条没弹出' };
@@ -384,12 +393,8 @@
         }
     }
 
-    /* ---------- 整站暗色 ----------
-       虎牙没有内置主题（实测 html 上没有主题 class、CSS 里也没有 dark/night/skin 约定），
-       所以只能由这里覆盖。样式单独一张 <style>，只在需要暗色时才挂上，
-       白天模式下不占样式表；开/关只切 html 上的 hlo-dark class。
-       选择器刻意压低特异性：虎牙的 class 名多为 hash 化的（Panel--xxx 那种），
-       撞名的概率低；配合 html.hlo-dark 前缀已足够压过普通类规则。 */
+    /* 整站暗色：虎牙无内置主题，只能由这里覆盖。样式单独一张 <style>，只在暗色时挂上。
+       选择器刻意压低特异性：虎牙 class 多为 hash 化（Panel--xxx），配合 html.hlo-dark 前缀已够用。 */
     const SITE_DARK_CSS = `
 html.hlo-dark{scrollbar-color:#4a4d57 #1b1d22;scrollbar-width:thin}
 html.hlo-dark body{background:#15161a!important;color:#ddd!important}
@@ -430,10 +435,7 @@ html.hlo-dark .dlg-btn-gray{background:#343740!important;color:#ddd!important}
 html.hlo-dark .common-panel-tips,
 html.hlo-dark [class*="Pop--"]{background:#2a2d36!important;color:#eee!important}
 
-/* 通用：卡片、次级块、分隔线
-       这些 [class*="xxx--"] 是给 hash 化的类名用的（Panel--a1b2c3 这种），
-       抗改名。实测过稳态开销：全量样式重算 0.003ms，插入 200 个节点 4.6ms
-       （无规则基线 3.7ms），差异可忽略，所以保留。 */
+/* 通用：卡片、次级块、分隔线。[class*="xxx--"] 为抗 hash 化类名改名 */
 html.hlo-dark [class*="item--"],
 html.hlo-dark [class*="card" i],
 html.hlo-dark .box-noble-level-1,
@@ -444,8 +446,7 @@ html.hlo-dark [class*="separator"],
 html.hlo-dark [class*="line--"]{background:#33363f!important;border-color:#33363f!important}
 html.hlo-dark .subscribe-hd{background:#23262d!important;color:#ddd!important}
 
-/* 房间信息条上的徽标与进度块（实测这些是浅灰底 rgb(242,242,242)，白底很扎眼）
-       类名是 hash 化的（sub--tU0ZNetSBi7UM4Wvhac1），必须用属性通配，写精确 class 一条都命不中 */
+/* 房间信息条的徽标与进度块（原为浅灰底 rgb(242,242,242)，白底很扎眼）；类名 hash 化，必须用属性通配 */
 html.hlo-dark [class*="sub--"],
 html.hlo-dark [class*="rankItem--"],
 html.hlo-dark [class*="bannerItem--"]{background:#2a2d36!important;color:#c8ccd4!important}
@@ -463,7 +464,7 @@ html.hlo-dark .room-weeklyRankList-nav-item{background:#23262d!important;color:#
 html.hlo-dark .room-player-gift-placeholder,
 html.hlo-dark #ab-banner{background:#1b1d22!important}
 
-/* 播放器左侧的活动图标列（实测是白底方块，落在房间信息条下方） */
+/* 播放器左侧的活动图标列（原为白底方块） */
 html.hlo-dark .player-gift-left,
 html.hlo-dark [class*="diy-activity-icon"],
 html.hlo-dark [class*="activity-icon-box"]{background:#2a2d36!important}
@@ -503,21 +504,25 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-settings-btn i{width:24px;height:24px;display:inline-block;margin-top:8px;background:none!important;line-height:0;transition:filter .15s ease}
 #hlo-settings-btn:hover i{filter:brightness(1.18)}
 #hlo-settings-btn i svg{display:block;width:24px;height:24px;border-radius:5px;overflow:hidden}
+#hlo-settings-btn i img{display:block;width:24px;height:24px;border-radius:5px;object-fit:cover}
 #hlo-settings-btn p{margin:0;font-size:12px;line-height:18px;text-align:center;color:inherit;white-space:nowrap}
 
 #hlo-settings-backdrop{position:fixed;inset:0;z-index:2147483645;background:transparent}
 #hlo-settings-panel{
-  --hlo-bg:#1f1f23;--hlo-fg:#eee;--hlo-title:#fff;--hlo-border:#3a3a40;--hlo-muted:#bbb;--hlo-faint:#888;
-  --hlo-sep:#34343a;--hlo-weak:#6e6e78;--hlo-sel-bg:#2a2a30;--hlo-sel-fg:#eee;--hlo-sel-br:#444;
+  --hlo-bg:#1f1f23;--hlo-fg:rgba(255,255,255,.92);--hlo-fg-muted:rgba(255,255,255,.66);--hlo-title:#fff;--hlo-border:#3a3a40;--hlo-muted:#bbb;
+  --hlo-sep:#34343a;--hlo-sel-bg:#2a2a30;--hlo-sel-fg:#eee;--hlo-sel-br:#444;
   --hlo-ghost-bg:#333;--hlo-ghost-fg:#ddd;--hlo-shadow:0 8px 28px rgba(0,0,0,.55);--hlo-btn:#f80;
   position:fixed;z-index:2147483646;width:280px;box-sizing:border-box;
   background:var(--hlo-bg);color:var(--hlo-fg);border:1px solid var(--hlo-border);border-radius:8px;
   box-shadow:var(--hlo-shadow);padding:12px 14px 14px;
-  font:13px/1.5 inherit;pointer-events:auto!important
+  /* 字体栈必须显式写：面板直接挂在虎牙页面上，会继承宿主字体。
+     不能用 font 简写混 inherit 作分量 —— 整条被判非法丢弃，会掉回虎牙 body 的 12px */
+  font-family:-apple-system,BlinkMacSystemFont,"Microsoft YaHei","Segoe UI","PingFang SC","Hiragino Sans GB","Helvetica Neue",Helvetica,Arial,sans-serif;
+  font-size:12px;line-height:1.5;pointer-events:auto!important
 }
 #hlo-settings-panel[data-theme="light"]{
-  --hlo-bg:#fff;--hlo-fg:#222;--hlo-title:#111;--hlo-border:#d8d8dc;--hlo-muted:#555;--hlo-faint:#888;
-  --hlo-sep:#e6e6ea;--hlo-weak:#9a9aa2;--hlo-sel-bg:#f2f2f5;--hlo-sel-fg:#222;--hlo-sel-br:#ccc;
+  --hlo-bg:#fff;--hlo-fg:#161823;--hlo-fg-muted:rgba(22,24,35,.62);--hlo-title:#111;--hlo-border:#d8d8dc;--hlo-muted:#555;
+  --hlo-sep:#e6e6ea;--hlo-sel-bg:#f2f2f5;--hlo-sel-fg:#222;--hlo-sel-br:#ccc;
   --hlo-ghost-bg:#ececf0;--hlo-ghost-fg:#333;--hlo-shadow:0 8px 28px rgba(0,0,0,.18);--hlo-btn:#f80;
 }
 
@@ -525,7 +530,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-settings-panel .hlo-head{display:flex;align-items:flex-start;gap:8px;margin:0 0 10px}
 #hlo-settings-panel h3{flex:1;min-width:0;margin:0;font-size:14px;font-weight:600;color:var(--hlo-title)}
 #hlo-settings-panel .hlo-head-right{display:flex;align-items:center;gap:2px;flex:0 0 auto}
-#hlo-settings-panel .ver{font-size:10px;color:var(--hlo-weak);white-space:nowrap}
+#hlo-settings-panel .ver{font-size:10px;font-weight:500;color:var(--hlo-fg-muted);white-space:nowrap}
 #hlo-settings-panel #hlo-theme{
   flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:none!important;border-radius:4px;
   color:var(--hlo-muted);cursor:pointer;line-height:0;transition:color .15s,background .15s
@@ -533,19 +538,19 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-settings-panel #hlo-theme:hover{color:var(--hlo-title);background:var(--hlo-ghost-bg)}
 #hlo-settings-panel #hlo-theme svg[data-mode]{display:none}
 #hlo-settings-panel #hlo-theme svg[data-active="1"]{display:block}
-#hlo-settings-panel label.row{display:flex;align-items:center;gap:8px;margin:8px 0;cursor:pointer}
+#hlo-settings-panel label.row{display:flex;align-items:center;gap:8px;margin:8px 0;cursor:pointer;font-weight:500}
 #hlo-settings-panel select{
   width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;
-  border-radius:4px;border:1px solid var(--hlo-sel-br);background:var(--hlo-sel-bg);color:var(--hlo-sel-fg);font-size:13px
+  border-radius:4px;border:1px solid var(--hlo-sel-br);background:var(--hlo-sel-bg);color:var(--hlo-sel-fg);
+  font-family:inherit;font-size:12px;font-weight:500
 }
 #hlo-settings-panel .field{margin-bottom:8px}
-#hlo-settings-panel .field-label{color:var(--hlo-muted);font-size:12px}
+#hlo-settings-panel .field-label{color:var(--hlo-fg);font-size:12px;font-weight:500}
 #hlo-settings-panel .actions{display:flex;gap:8px;margin-top:12px}
-#hlo-settings-panel button{flex:1;padding:7px 0;border:none;border-radius:4px;cursor:pointer;font-size:13px}
+#hlo-settings-panel button{flex:1;padding:7px 0;border:none;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:500}
 #hlo-settings-panel .btn-primary{background:var(--hlo-btn);color:#111;font-weight:600}
-#hlo-settings-panel .btn-ghost{background:var(--hlo-ghost-bg);color:var(--hlo-ghost-fg)}
-#hlo-settings-panel .hint{margin-top:8px;color:var(--hlo-faint);font-size:11px}
-#hlo-settings-panel .credits{margin:10px 0 -6px;padding-top:8px;border-top:1px solid var(--hlo-sep);color:var(--hlo-weak);font-size:11px;text-align:center}
+#hlo-settings-panel .btn-ghost{background:var(--hlo-ghost-bg);color:var(--hlo-fg)}
+#hlo-settings-panel .credits{margin:10px 0 -6px;padding-top:8px;border-top:1px solid var(--hlo-sep);color:var(--hlo-fg-muted);font-size:11px;text-align:center}
 #hlo-settings-panel .credits .ver{margin-bottom:3px}
 #hlo-settings-panel .credits a{color:var(--hlo-btn);text-decoration:underline}
 #hlo-settings-panel .credits a:hover{color:#ffc45c}
@@ -579,64 +584,6 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-danmu-freeze .hlo-dmbtn[disabled]{opacity:.55;cursor:default;filter:none}
 `;
         document.head.appendChild(style);
-    }
-
-    function optimizerIconSvg() {
-        return (
-            '<svg viewBox="0 0 512 512" width="24" height="24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-            '<defs>' +
-            '<linearGradient id="hloIcoBg" x1="0%" y1="0%" x2="100%" y2="100%">' +
-            '<stop offset="0%" stop-color="#12121A"/><stop offset="100%" stop-color="#1C1C2A"/>' +
-            '</linearGradient>' +
-            '<linearGradient id="hloIcoYlw" x1="0%" y1="0%" x2="0%" y2="100%">' +
-            '<stop offset="0%" stop-color="#FFE033"/><stop offset="100%" stop-color="#FFA500"/>' +
-            '</linearGradient>' +
-            '<linearGradient id="hloIcoCyn" x1="0%" y1="100%" x2="100%" y2="0%">' +
-            '<stop offset="0%" stop-color="#00E5FF"/><stop offset="100%" stop-color="#00FF88"/>' +
-            '</linearGradient>' +
-            '<filter id="hloIcoShd" x="-20%" y="-20%" width="140%" height="140%">' +
-            '<feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.5"/>' +
-            '</filter>' +
-            '</defs>' +
-            '<rect width="512" height="512" rx="115" fill="url(#hloIcoBg)"/>' +
-            '<g opacity="0.92">' +
-            '<circle cx="256" cy="256" r="205" fill="none" stroke="url(#hloIcoCyn)" stroke-width="12" stroke-dasharray="26 18" opacity="0.55"/>' +
-            '<circle cx="256" cy="256" r="186" fill="none" stroke="#00E5FF" stroke-width="3" opacity="0.35"/>' +
-            '<g transform="translate(402 108) rotate(18) scale(1.18)">' +
-            '<g fill="url(#hloIcoCyn)">' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(45)"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(90)"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(135)"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(180)"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(225)"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(270)"/>' +
-            '<rect x="-7" y="-37" width="14" height="17" rx="5" transform="rotate(315)"/>' +
-            '<circle cx="0" cy="0" r="23"/>' +
-            '</g>' +
-            '<circle cx="0" cy="0" r="9.5" fill="#141420"/>' +
-            '<circle cx="0" cy="0" r="9.5" fill="none" stroke="#86FFF4" stroke-opacity="0.35" stroke-width="3"/>' +
-            '</g>' +
-            '<g transform="translate(115 405) rotate(45) scale(1.25)">' +
-            '<path d="M -10 42 L -10 -4 C -21 -7 -28 -17 -28 -30 L -28 -52 L -12 -35 L 12 -35 L 28 -52 L 28 -30 C 28 -17 21 -7 10 -4 L 10 42 A 10 10 0 0 1 -10 42 Z" ' +
-            'fill="url(#hloIcoCyn)" stroke="#00323B" stroke-opacity="0.4" stroke-width="2" stroke-linejoin="round"/>' +
-            '<circle cx="0" cy="32" r="4.5" fill="#141420" stroke="#86FFF4" stroke-opacity="0.3" stroke-width="2"/>' +
-            '<path d="M -3.5 -26 L -3.5 24" fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="4" stroke-linecap="round"/>' +
-            '</g>' +
-            '</g>' +
-            '<g filter="url(#hloIcoShd)">' +
-            '<path d="M 186 182 C 186 122, 326 122, 326 182 C 326 268, 296 342, 256 424 C 216 342, 186 268, 186 182 Z" ' +
-            'fill="url(#hloIcoYlw)" stroke="#4A2E15" stroke-width="14" stroke-linejoin="round"/>' +
-            '<path d="M 216 196 Q 214 268, 242 346" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.45"/>' +
-            '<path d="M 234 226 L 292 262 L 234 298 Z" fill="#4A2E15" stroke="#4A2E15" stroke-width="17" stroke-linejoin="round"/>' +
-            '</g>' +
-            '<g>' +
-            '<rect x="156" y="452" width="200" height="38" rx="19" fill="#00E5FF" opacity="0.16"/>' +
-            '<rect x="156" y="452" width="200" height="38" rx="19" fill="none" stroke="#00E5FF" stroke-width="2" opacity="0.55"/>' +
-            '<text x="256" y="479" font-family="Arial, sans-serif" font-weight="900" font-size="22" fill="#FFFFFF" text-anchor="middle" letter-spacing="3">OPTIMIZER</text>' +
-            '</g>' +
-            '</svg>'
-        );
     }
 
     function extractDanmuText(item) {
@@ -675,18 +622,15 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return !!(q && q !== 'null' && q !== 'undefined' && q !== 'false' && String(q).trim());
         }
 
-        // 这一档到底有没有流可播。
-        // 占位列表（起播前那份）没有 sDisplayName/status 之外的字段，先当不可用。
-        // 解锁本身不靠这个判断 —— unlockQuality() 是无差别把所有档的 status 置 0，
-        // 扫码即享的档也一起解锁，这样点它时站侧才会真去换流。
+        // 占位列表（起播前）没有 sDisplayName/status 之外的字段，先当不可用；
+        // 解锁本身不看它 —— unlockQuality() 无差别把所有档 status 置 0
         static isStreamable(data) {
             if (!data) return false;
             if (data.sDisplayName == null) return false;
             return true;
         }
 
-        // 站侧已按码率排好序（iSortValue：20000 > 8000 > 4000 > 2000 > 500），
-        // 比维护一张画质名数组可靠 —— 档位名随房间变（蓝光15M/10M 都有）。
+        // iSortValue 是站侧的码率权重；档位名随房间变，别维护名称数组
         static sortOf($, li) {
             const d = (li && $(li).data('data')) || {};
             const v = Number(d.iSortValue);
@@ -695,8 +639,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return Number.isFinite(r) && r > 0 ? r : 0;
         }
 
-        // 免扫码高画质：把画质列表里所有档的 status 置 0，扫码即享的档也一起解锁。
-        // 必须无差别解锁 —— 之前按 iEnable 过滤，结果扫码档没解锁，点下去必然黑屏。
+        // 免扫码：无差别把所有档 status 置 0。按 iEnable 过滤会让扫码档没解锁、点下去黑屏
         unlockQuality() {
             const $ = page$();
             if (!$) {
@@ -714,7 +657,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                         changed += 1;
                     }
                 });
-                // 解锁后把「扫码即享」「请先登录」这些角标去掉，UI 上不再误导
+                // 解锁后去掉「扫码即享」「请先登录」角标
                 this.stripQualityTags($list);
                 log(`unlock items=${$list.length} changed=${changed}`);
                 return true;
@@ -724,10 +667,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             }
         }
 
-        // 站侧给锁定档渲染的角标（实测三种后缀：「请先登录」「请先登陆」「扫码即享」，
-        // 赛事/蓝光档用后者，是 <div class="bitrate-right-btn common-enjoy-btn">）。
-        // 解锁后直接移除节点：只设 display:none 的话 textContent 里还留着这几个字，
-        // 列表看着仍像没解锁（站侧自己也会把它设成 display:none，但节点还在）。
+        // 锁定档角标三种后缀：「请先登录」「请先登陆」「扫码即享」。
+        // 必须移除节点而非设 display:none —— textContent 里还留着这几个字
         stripQualityTags($list) {
             try {
                 $list.each((_, li) => {
@@ -747,7 +688,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return el ? (el.textContent || '').trim() : '';
         }
 
-        // 列表上带 on 的那项才是真选中的；标签 .player-videotype-cur 在播放器没起播时会滞后
+        // 带 on 的那项才是真选中的；.player-videotype-cur 在没起播时会滞后
         selectedQualityText() {
             const on = queryOne('.player-videotype-list li.on');
             if (!on) return '';
@@ -759,28 +700,24 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 } catch (e) {
                 }
             }
-            // 后缀实测有三种：「请先登录」「请先登陆」「扫码即享」（赛事/蓝光档用后者）。
-// 正常都靠 sDisplayName 绕开，这里兜底也要剥干净，否则和标签比不上就算成没切上去。
+            // 兜底也要剥掉锁定后缀，否则和标签比不上会被判成没切上去
             return (on.textContent || '')
                 .replace(/请先登录|请先登陆|扫码即享/g, '')
                 .trim();
         }
 
-        // 起播前清晰度列表是占位的（只有「超清|高清」这种），点了也不生效，必须等 video 真的有数据
+        // 起播前列表是占位的（只有「超清|高清」），点了也不生效
         isPlayerReady() {
             const v = queryOne(['#player-container video', '#player-vdieobox video', 'video']);
             return !!v && (v.readyState >= 2 || v.videoWidth > 0);
         }
 
-        // 页面里一个 video 都没有，说明是电台之类不推视频的房间，
-        // 再等多久都没用，必须认出来直接跳过，否则每轮白等 15s
+        // 没有 video 说明是电台类房间，等也没用，直接跳过以免每轮白等 15s
         hasVideoElement() {
             return !!queryOne(['#player-container video', '#player-vdieobox video', 'video']);
         }
 
-        // 占位列表的每一项都没有站侧数据（实测 data('data') 是 {}），
-        // 真实列表每项都带 sDisplayName / status。拿占位列表去解析目标只会选到「超清」，
-        // 所以在拿到真实列表之前一律视为不可用。
+        // 占位项 data('data') 是 {}，真实项带 sDisplayName/status；拿占位解析只会锁死在超清
         realQualityList() {
             const $ = page$();
             if (!$) return null;
@@ -794,17 +731,14 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return real ? $list : null;
         }
 
-        // 标签文本只是 UI 的自说自话：实测点到扫码档后标签会变成「蓝光20M」，
-        // 但 video 立刻变 0x0/readyState=0，画面全黑。所以判成功必须看 video 有没有帧。
+        // 标签会跟着变但画面可能全黑，判成功必须看 video 有没有帧
         videoAlive() {
             const v = queryOne(['#player-container video', '#player-vdieobox video', 'video']);
             if (!v) return false;
             return v.videoWidth > 0 && v.videoHeight > 0 && v.readyState >= 2;
         }
 
-        // 两个信号打架（标签=高清 而 li.on=超清）就是起播前的占位状态，
-        // 这时任何一边都不能当准 —— 之前用 || 合并会在这里误判成「已经是超清了」，
-        // 于是连点都不点就收工，最高画质永远上不去。
+        // 两个信号打架（标签=高清 而 li.on=超清）就是起播前占位态，任一边都不能当准；用 || 合并会误判成已切好
         isCurrentQuality(target) {
             const n = PlayerOptimizer.normalize(target);
             const label = PlayerOptimizer.normalize(this.currentQualityText());
@@ -833,6 +767,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
         resolveTarget($, $list) {
             const nameOf = (li) => PlayerOptimizer.nameOf($, li);
+            // 只认设置页那套档位；房间自造的 HDR 变体 sort 恒比同级本档高 100，取最大必先抓到它
+            const stdSet = new Set(STANDARD_QUALITIES.map((q) => PlayerOptimizer.normalize(q)));
+            const isStd = (li) => stdSet.has(PlayerOptimizer.normalize(nameOf(li)));
             const pick = (name) => {
                 const want = PlayerOptimizer.normalize(name);
                 if (!want) return null;
@@ -843,19 +780,18 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 return hit;
             };
 
-            // 用户指定的档：照点。点名要哪档就是哪档，不做可用性过滤。
+            // 指定档照点，不做可用性过滤
             if (this.isValidQuality(this.settings.targetQuality)) {
                 const el = pick(this.settings.targetQuality);
                 if (el) return { el, text: this.settings.targetQuality };
                 warn(`quality "${this.settings.targetQuality}" not in room → highest`);
             }
 
-            // 自动最高：解锁之后按 iSortValue 取最大的那个。
-            // iSortValue 是站侧给的码率权重（蓝光50M=50000 > 蓝光20M=20000 > 蓝光8M=8000 …），
-            // 比维护一张画质名数组可靠 —— 档位名随房间变（蓝光30M/15M/10M 都有）。
+            // 自动最高：按 iSortValue 取最大
             let best = null;
             let bestKey = -1;
             $list.each((_, li) => {
+                if (!isStd(li)) return;
                 if (!PlayerOptimizer.isStreamable($(li).data('data'))) return;
                 const key = PlayerOptimizer.sortOf($, li);
                 if (!best || key > bestKey) {
@@ -865,8 +801,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             });
             if (best) return { el: best, text: nameOf(best) };
 
-            // 全都没有可用字段（异常列表），退回首项让上层报「切不动」
-            const first = $list.get(0);
+            // 异常列表：只退回设置页档位里的首项，同样不碰 HDR 档
+            const first = $list.filter((_, li) => isStd(li)).get(0) || null;
             return { el: first, text: first ? nameOf(first) : '' };
         }
 
@@ -888,7 +824,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             const $ = page$();
             if (!$) throw new Error('jQuery not ready');
 
-            // 只认真实列表：占位列表里没有蓝光/4K，解析出来的目标必然是「超清」
+            // 只认真实列表：占位列表没有蓝光/4K，解析出来必然是超清
             const $list = this.realQualityList();
             if (!$list) throw new Error('quality list not ready');
 
@@ -896,8 +832,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
             const { el, text } = this.resolveTarget($, $list);
             if (!el || !text) throw new Error('target quality missing');
-            // 记下目标：站点若把画质改回去，落定复核要拿它跟当前实际档位比，
-            // 而不是信 qualityDone 这个标志位（标志位不会自己变回 false）
+            // 记下目标供落定复核比对；qualityDone 不会自己变回 false，不能信它
             this.targetText = text;
 
             if (this.isCurrentQuality(text)) {
@@ -908,9 +843,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             $(el).click();
             this.qualityDone = await this.waitForQuality(this.targetText, 6000);
 
-            // 兜底只看「有没有画面」：UI 标签认了不算数，黑屏时它是照样变的。
-            // 这里不做「降档再试」—— 实测黑屏之后点任何一档都恢复不了
-            // （连 iEnable=1 的蓝光8M 也起不来），连点只会浪费时间并刷一堆警告。
+            // 只看有没有画面，标签认了不算数。不做降档重试：黑屏后点任何一档都恢复不了
             if (this.videoAlive()) {
                 this.qualityDone = true;
                 return true;
@@ -925,8 +858,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
         
 
-        // body 上的 mode-page-theater 与按钮 class 是同步的（实测进出各 3 次都一致），
-        // 两个信号交叉验证，任一成立即认为影院开着
+        // body 的 mode-page-theater 与按钮 class 同步，任一成立即认为影院开着
         isTheaterOn() {
             if (/mode-page-theater/.test(document.body.className || '')) return true;
             const $ = page$();
@@ -940,8 +872,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
         async enterTheater() {
             if (!this.settings.autoTheater) return true;
-            // 自动进观影只在进入页面的最初几秒负责一次：进成就置 theaterDone，
-            // 之后（落定复核 / 换画质补跑）都不再点它，用户手动退出也就不会被拽回去
+            // 只在进页面最初负责一次；之后不再点，用户手动退出不会被拽回去
             if (this.theaterDone) return true;
             if (this.isTheaterOn()) {
                 this.theaterDone = true;
@@ -965,7 +896,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
             if ($) $(btn).click();
             else btn.click();
-            // 切影院要重建播放器，等固定 350ms 常常判成没切上，这里等真生效
+            // 切影院要重建播放器，固定 350ms 常判成没切上，这里等真生效
             this.theaterDone = await waitFor(() => this.isTheaterOn(), {
                 timeout: 6000,
                 interval: 250,
@@ -978,12 +909,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return this.theaterDone;
         }
 
-        // 两样是否真的都到位了。画质要比当前实际档位，不能只看 qualityDone 标志位，
-        // 站点把画质改回去时那个标志位仍是 true。
+        // 画质比当前实际档位，不能只看 qualityDone（站点改回去时它仍是 true）
         settled() {
-            // 观影只看 theaterDone：进过一次就算完成，之后不再维持；画质要比当前实际档位
-            // 两样是否真的都到位了。画质要比当前实际档位，不能只看 qualityDone 标志位，
-            // 站点把画质改回去时那个标志位仍是 true。
+            // 观影只看 theaterDone：进过一次即完成，之后不维持
             const theaterOk = !this.settings.autoTheater || this.theaterDone;
             const qualityOk = this.targetText ? this.isCurrentQuality(this.targetText) : this.qualityDone;
             return theaterOk && qualityOk;
@@ -1005,7 +933,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     warn('player not streaming：页面里没有 video 元素，可能不是视频直播间，跳过清晰度与影院');
                 }
             }
-            // 等真实清晰度列表：起播前那份只有「超清|高清」，拿去解析目标只会锁死在超清
+            // 等真实列表；占位列表只有「超清|高清」，解析出来会锁死在超清
             await waitFor(() => this.realQualityList(), {
                 timeout: 8000,
                 interval: 400,
@@ -1027,13 +955,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             if (this.running) return;
             this.running = true;
             try {
-                // 超时不该把整个 run 带走，交给下面的循环继续重试
+                // 超时不带走整个 run，交给下面的循环重试
                 await waitForJQuery(15000).catch(() => warn('jQuery not ready, 继续重试'));
 
-                // 重试必须收在 run 内部。之前是靠 watchdog 的 20 个 tick，
-                // 而一轮 attempt 自己就要十几秒，tick 在真正重试之前就被耗光了：
-                // 播放器起得慢时第一轮还在跑，定时器就已经 clearInterval 放弃。
-                // 次数用 MAX_TRIES，墙钟只是兜底（单轮太长时提前收手）。
+                // 重试收在 run 内部按次数与墙钟算；靠 watchdog tick 会在真正重试前被耗光
                 const until = Date.now() + PLAYER_RETRY_BUDGET;
                 let rounds = 0;
                 while (rounds < MAX_TRIES) {
@@ -1057,8 +982,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             }
         }
 
-        // 起播后站侧可能把画质改回默认，落定后再核几轮，掉了就补一轮。
-        // run() 结尾还会再排一次复核，不封顶就变成「复核→重跑→再复核」的无限链。
+        // 起播后站侧会把画质改回默认，落定后再核几轮，掉了就补
         scheduleSettleCheck() {
             this.clearSettleTimers();
             if (this.settleFixes >= PLAYER_SETTLE_MAX_FIX) return;
@@ -1091,7 +1015,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         startWatchdog() {
             setTimeout(() => this.run(), 800);
 
-            // 只负责换房间后重来；轮询式重试已经收进 run() 内部按墙钟时间做了
+            // 只负责换房间后重来；重试已收进 run() 内部
             const onNav = () => {
                 this.theaterDone = false;
                 this.qualityDone = false;
@@ -1142,7 +1066,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             const btn = document.createElement('li');
             btn.id = 'hlo-settings-btn';
             btn.title = '虎牙直播优化器 设置（全站）';
-            btn.innerHTML = `<i>${optimizerIconSvg()}</i><p>设置</p>`;
+            // 图标取自 @resource / @icon
+            btn.innerHTML = `<i>${optimizerIconImg()}</i><p>设置</p>`;
+            const icon = btn.querySelector('img');
+            if (icon) icon.addEventListener('error', () => icon.remove());
             btn.addEventListener('mousedown', (e) => e.stopPropagation());
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -1248,7 +1175,6 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 <div class="field">
                     <div class="field-label">默认画质（全站生效）</div>
                     <select id="hlo-quality-select">${opts}</select>
-                    <div class="hint">自动解锁画质列表里所有「扫码即享」的档位，再切到所选画质；房间没有该档时回落到最高可用档。</div>
                 </div>
                 <label class="row"><input type="checkbox" id="hlo-theater" ${this.settings.autoTheater ? 'checked' : ''}/> 自动进入观影模式</label>
                 <label class="row"><input type="checkbox" id="hlo-plus1" ${this.settings.enableScreenPlusOne !== false ? 'checked' : ''}/> 画面弹幕悬浮 +1 复读</label>
@@ -1260,7 +1186,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     <button type="button" class="btn-primary" id="hlo-save">保存并应用</button>
                 </div>
                 <div class="credits">
-                    <div class="ver">v${escapeHtml(VERSION)}</div>
+                    <div class="ver">v${escapeHtml(meta('version'))}</div>
                     <div>Powered by <a href="https://mks155.github.io" target="_blank" rel="noopener noreferrer">mks155</a></div>
                 </div>
             `;
@@ -1277,12 +1203,11 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
         applyTheme(panel, mode) {
             const resolved = this.resolveTheme(mode);
-            // 整站生效：在 html 上挂/摘 class，样式表随之增删
+            // 整站生效：在 html 上挂/摘 class
             const root = document.documentElement;
             if (root) root.classList.toggle('hlo-dark', resolved === 'dark');
             ensureSiteDarkStyle(resolved === 'dark');
-            // 面板自身也跟着走（面板是 body 直系子节点，会被整站规则扫到，
-            // 这里显式同步一份，保证它在任何模式下都一致）
+            // 面板是 body 直系子节点，会被整站规则扫到，这里再显式同步一份
             if (panel) panel.dataset.theme = resolved;
             if (mode !== 'auto' || this.themeMq) return;
             try {
@@ -1297,7 +1222,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             }
         }
 
-        /** 切主题：立即生效并落盘（配色是纯显示偏好，不等「保存并应用」） */
+        /** 切主题：立即生效并落盘（显示偏好，不等「保存并应用」） */
         cycleTheme(panel) {
             const cur = THEME_MODES.includes(this.settings.themeMode) ? this.settings.themeMode : 'auto';
             const next = THEME_MODES[(THEME_MODES.indexOf(cur) + 1) % THEME_MODES.length];
@@ -1377,7 +1302,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
 
         enabled() {
-            // 举报时官方黑条接管，短时间内别再弹冻结条去盖它
+            // 举报时官方黑条接管，短时间别再弹冻结条
             return this.settings.enableScreenPlusOne !== false && Date.now() >= this.holdUntil;
         }
 
@@ -1455,8 +1380,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             });
             wrap.appendChild(btn);
 
-            // 原始文案只认一次：连点时若拿当前文字当「原文」，
-                // 第二个定时器会把「已复制」还原回去，按钮就永久卡在提示语上。
+            // 原始文案只认一次；连点时若拿当前文字当「原文」，按钮会永久卡在「已复制」
                 const flash = (el, txt, ms) => {
                     const origin = el.dataset.hloLabel || el.textContent;
                     el.dataset.hloLabel = origin;
@@ -1501,7 +1425,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 const item = this.ghost;
                 const r = await reportDanmu(item);
                 if (r.ok) {
-                    // 官方黑条已经接管，撤掉冻结条免得盖住它，并按住别马上又冒出来
+                    // 官方黑条接管，撤掉冻结条并按住别再冒出来
                     log('举报入口已交给官方', r.via);
                     this.clear();
                     this.holdUntil = Date.now() + 2000;
@@ -1592,7 +1516,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 }, 1000);
             }
 
-            // 指针坐标离开冻结条矩形就复原（隐藏的原弹幕不再派发事件）
+            // 指针离开冻结条矩形就复原（隐藏的原弹幕不派发事件）
             document.addEventListener(
                 'mousemove',
                 (e) => {
@@ -1778,14 +1702,11 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
     }
 
 // ---------- 粉丝团：弹幕颜色 + 打卡 ----------
-    // 打卡直接走站侧 WUP，不开面板、不点界面：
-    //   读 wupui/getFansSign  → FansSignInfo{iPos, lPosTime, lSignInFlag}
-    //   写 wupui/setFansSign  → iCode===0 成功，否则 sMsg 是站侧原因（如「请勿重复打卡」）
-    // 当天是否已打卡是位掩码：1 << (iPos - 1) & lSignInFlag
-    // 记「今天已经扫过一遍粉丝团」，避免刷新页面就重来一轮
+    // 打卡直接走站侧 WUP，不开面板：getFansSign 读状态，setFansSign 写（iCode===0 成功，否则 sMsg 是原因）
+    // 当天已打卡是位掩码：1 << (iPos - 1) & lSignInFlag
     const SWEEP_DAY_KEY = NS + ':fansSweepDay';
 
-    // TTP.ready 的回调里才有 taf 结构体和 userId；sendWup2 第 4 参是回调不是 Rsp 构造器
+    // taf 结构体与 userId 要等 TTP.ready；sendWup2 第 4 参是回调，不是 Rsp 构造器
     function wupCall(module, action, buildReq, timeout = 8000) {
         return new Promise((resolve, reject) => {
             let done = false;
@@ -1809,8 +1730,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                         const req = buildReq(t);
                         t.sendWup2(module, action, req, (rsp) => {
                             if (!rsp) return finish(reject, new Error('无响应'));
-                            // 不是每个 Rsp 都带 iCode（如 queryBadgeInfoList 只有 vBadgeInfo），
-                            // 只有带了才校验，否则会把成功响应误判成失败
+                            // 不是每个 Rsp 都带 iCode，只有带了才校验，否则成功响应会被误判成失败
                             if ('iCode' in rsp && rsp.iCode !== 0) {
                                 return finish(reject, new Error(rsp.sMsg || 'iCode ' + rsp.iCode));
                             }
@@ -1842,9 +1762,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         );
     }
 
-    // 「我的全部粉丝团」：BadgeInfoListRsp.vBadgeInfo.value 是 Vector，
-    // 真实数组在 .value 上（数 Object.keys 会恒等于 2）。
-    // 每条的 lBadgeId 就是主播 uid，正好是 setFansSign 要的 lPid。
+    // vBadgeInfo.value 是 Vector，真实数组再取一层 .value（Object.keys 恒等于 2）；每条 lBadgeId 即主播 uid
     function myFansClubs(timeout = 10000) {
         return wupCall(
             'liveui',
@@ -1899,11 +1817,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         return true;
     }
 
-    // 官方弹幕颜色条目的 handler。两套实现的字段名不一样：
-    //   粉丝团 RoomFanBarrageColor → onClick
-    //   赛事   barrageColorClub     → onPick
-    // 都是零参数、直接写 barrageColor.customColor.set，不吃 React 合成事件对象，
-    // 所以不能复用 reactClick 造的事件。找不到 fiber 就返回 false 让调用方退回 DOM click。
+    // 官方颜色条目 handler：粉丝团 RoomFanBarrageColor → onClick，赛事 barrageColorClub → onPick。
+    // 两者零参数、直接写 customColor.set，不吃合成事件，故不能复用 reactClick；
+    // 找不到 fiber 返回 false，调用方退回 DOM click
     function callOfficialBarrageHandler(el) {
         if (!el) return false;
         const key = Object.keys(el).find((k) => k.startsWith('__reactInternalInstance$') || k.startsWith('__reactFiber$'));
@@ -1913,7 +1829,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         while (fiber && depth < 5) {
             const props = fiber.memoizedProps || {};
             const fn = props.onPick || props.onClick;
-            // fn.length === 0：带参数的是 React 的合成事件包装，说明找错了层
+            // fn.length === 0 才对；带参数的是合成事件包装，说明找错层
             if (typeof fn === 'function' && fn.length === 0) {
                 try {
                     fn();
@@ -1966,11 +1882,9 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
     }
 
     // ---------- 弹幕颜色 ----------
-    // 官方档位是写死的常量表（chat/barrageColor.js）：
-    //   六档按徽章等级 T=[1,3,6,10,14,18]，颜色固定 66FF99/CCFF66/22CECE/FF706E/FF66FF/FFCC00；
-    //   另有「粉丝打卡」(85C4FF)、「超粉」(FF6699)、「超粉Plus」(AA68FF)。
-    // 只按徽章等级挑档：「粉丝打卡」档不进表（barrageColorRank 查不到 → rank -1 → 被过滤），
-    // 它靠今天打过卡才解锁，不是等级档位，不该由脚本替用户挑。
+    // 官方档位表写死在 chat/barrageColor.js：六档按徽章等级 T=[1,3,6,10,14,18]，
+    // 颜色 66FF99/CCFF66/22CECE/FF706E/FF66FF/FFCC00；另有粉丝打卡 85C4FF、超粉 FF6699、超粉Plus AA68FF
+    // 只按徽章等级挑档。「粉丝打卡」靠当天打卡解锁、不是等级档，不进表（rank -1 被过滤）
     const BARRAGE_RANKS = {
         超粉Plus: 100,
         超粉: 90,
@@ -1980,7 +1894,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         Lv6: 40,
         Lv3: 30,
         Lv1: 20
-        // 官方第一档是「不染色」(colorDefault)，rank 0，不参与挑最高档
+        // 首档「不染色」rank 0，不参与挑最高档
     };
 
     function barrageColorRank(label) {
@@ -1988,8 +1902,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         return Object.prototype.hasOwnProperty.call(BARRAGE_RANKS, key) ? BARRAGE_RANKS[key] : -1;
     }
 
-    // 锁定档的 innerText 形如「Lv1414级粉丝福」「Lv1818级粉丝福」
-    // 「超粉超粉福利该弹幕颜」，前缀就是 BARRAGE_RANKS 的键，取最长匹配的那个
+    // 锁定档 innerText 会粘成「Lv1414级粉丝福」这类，前缀即 BARRAGE_RANKS 的键，取最长匹配
     function stripBarrageHint(label) {
         const text = String(label || '').trim();
         let best = '';
@@ -2007,8 +1920,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             this.lastRoom = null;
             this.busy = false;
             this.sweeping = false;
-            // 有些房间（如赛事官方直播间）没有粉丝团，只有勋章/VIP 的彩色弹幕。
-            // 这里按房间记忆能力：null=未知，探明为 false 后本房间不再尝试也不刷警告。
+            // 有些房间（如赛事直播间）没有粉丝团；按房间记忆能力，null=未知，探明 false 后不再尝试
             this.capRoom = null;
             this.cap = { barrage: null, clubPanel: null };
             this.capMiss = { barrage: 0, clubPanel: 0 };
@@ -2034,7 +1946,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             if (c[key] === false) return true;
             this.capMiss[key] = (this.capMiss[key] || 0) + 1;
             if (this.capMiss[key] < MAX_TRIES) {
-                // 只在第一次提醒，之后安静重试，否则会刷屏
+                // 只提醒一次，之后安静重试以免刷屏
                 if (this.capMiss[key] === 1) warn(warnMsg);
                 return false;
             }
@@ -2061,7 +1973,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             if (nowOff) {
                 this.clearTimers();
             } else if (wasOff && this.bound) {
-                // 之前全关掉了、timer 已被清空，重新勾上必须重新排程，否则要刷新页面才恢复
+                // 之前全关时 timer 已清空，重新勾上必须重新排程，否则要刷新才恢复
                 this.arm();
             }
         }
@@ -2101,7 +2013,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                         return;
                     }
                     tries += 1;
-                    // 达成就收手，不重跑 —— 之前每轮都重切一次，用户看到颜色被反复设置
+                    // 达成就收手不重跑，否则颜色会被反复设置
                     if (await this.applyBarrageColor()) {
                         log('fansbadge: 弹幕颜色已就绪', { 尝试次数: tries, ...this.capSummary() });
                         return;
@@ -2118,9 +2030,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 this.timers.push(
                     setTimeout(() => {
                         if (this.roomUid() !== room) return;
-                        // 打卡走接口，不再需要 FAN_CLUB_OPEN，
-                        // 所以赛事房间也不会被顶出「赛事VIP」广告面板；
-                        // 是不是真粉丝团由服务端 iCode/sMsg 说话
+                        // 打卡走接口、不发 FAN_CLUB_OPEN，赛事房间不会被顶出「赛事VIP」广告面板；真否由 iCode/sMsg 定
                         this.checkIn();
                     }, FANS_CHECKIN_DELAY)
                 );
@@ -2148,7 +2058,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
         async checkIn() {
             if (this.busy) {
-                // 不出声就等于今天的打卡悄悄没了，要留痕
+                // 打卡静默失败等于当天没了，必须留痕
                 warn('fansbadge: 打卡与其它操作撞上了，本次跳过');
                 return;
             }
@@ -2175,8 +2085,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             this.sweepAllClubs();
         }
 
-        // 遍历「我的全部粉丝团」逐个打卡，每个之间 1~3s 随机抖动，
-        // 免得连着打被站侧当成刷接口。一天只扫一轮，刷新页面不再重来。
+        // 遍历名下粉丝团逐个打卡，间隔 1~3s 抖动以免被判刷接口；一天只扫一轮
         async sweepAllClubs() {
             if (this.sweeping) return;
             const today = new Date().toDateString();
@@ -2197,7 +2106,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 const failed = [];
                 for (let i = 0; i < clubs.length; i++) {
                     const c = clubs[i];
-                    // 抖动放在每次之后，最后一个后面不必再等
+                    // 抖动放在每次之后，末次不必再等
                     if (i > 0) await sleep(1000 + Math.random() * 2000);
                     try {
                         const r = await checkInOne(c.pid);
@@ -2217,17 +2126,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
 
         // 两套面板都认，返回「真能读到内容」的那个。
-        //
-        // 为什么不能靠 TT_ROOM_DATA.type：实测 shenqiangxiaozi 是 type='MATCH'
-        // 但它其实是粉丝团房间（开了 PEL 赛事，type 跟着变了），而它开出的是粉丝弹幕；
-        // 反过来 lpl / vctcn 才是真赛事。官方自己的判据是
-        // match.huya.com/match/teambadge/queryTeamMedalConfig 返回的 matchId（lpl=1、vctcn=47、
-        // shenqiangxiaozi=0），那是异步接口，脚本为了判个类型去发请求不划算。
-        //
-        // #J-room-club-color 是 HTML 模板里的静态节点，所有房间都有，display:none 时
-        // rect 为 0x0；粉丝团那套是 React portal，收起时高度 0 但条目已在 DOM 里。
-        // 所以两边各按自己的「内容已就绪」特征认，不靠先后顺序 ——
-        // 早期版本先试赛事再试粉丝团，赛事房间若面板还没撑开就会掉到粉丝团分支去。
+        // 别用 TT_ROOM_DATA.type 判：type 会跟着赛事配置变（shenqiangxiaozi 是 MATCH 却开粉丝弹幕），
+        // 官方判据是 queryTeamMedalConfig 的 matchId，那是异步接口，不值得为判型去发。
+        // #J-room-club-color 是静态节点，所有房间都有，display:none 时 rect 为 0x0；
+        // 粉丝团那套是 React portal，收起时高度 0 但条目已在 DOM —— 各按自己的就绪特征认，不靠先后顺序
         barragePanel() {
             const plain = queryOne(SEL.fansClubColorPanel);
             if (plain) {
@@ -2241,14 +2143,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return null;
         }
 
-        // 赛事房间那套是 <li class="color-item[ locked][ current]">，没有文案，
-        // 档位高低只能靠 DOM 顺序 —— 官方正是按 colourLevelInfo 等级升序渲染的。
+        // 赛事那套 <li class="color-item[ locked][ current]"> 没有文案，档位高低只能靠 DOM 顺序
         readBarrageColors(panel) {
             if (panel.id === SEL.fansClubColorPanel.slice(1)) {
-                // 赛事房间这套由 barrageColorClub.js 渲染：档位表来自接口
-                // match.huya.com/match/teambadge/queryTeamMedalConfig 的 colourLevelInfo
-                //（{十进制色值: 等级}），官方按等级升序渲染，所以 DOM 顺序就是由低到高。
-                // 白档（color-item1）是「不染色」，恒排第一且不算档位。
+                // 档位表来自 queryTeamMedalConfig 的 colourLevelInfo，官方按等级升序渲染，DOM 序即由低到高；白档 color-item1 是「不染色」，恒排第一且不算档位
                 return queryAll(SEL.fansClubColorList, panel).map((el, i) => {
                     const cls = String(el.className || '');
                     const rgb = ((el.getAttribute('style') || '').match(
@@ -2271,7 +2169,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                         isDefault,
                         locked: /(^|\s)locked(\s|$)/.test(cls),
                         selected: /(^|\s)current(\s|$)/.test(cls),
-                        // 白档 rank 0 不参与挑最高档；其余按 DOM 序（= 官方等级序）
+                        // 白档 rank 0 不参与挑档，其余按 DOM 序（= 官方等级序）
                         rank: isDefault ? 0 : i
                     };
                 });
@@ -2287,21 +2185,18 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                         el,
                         span,
                         label,
-                        // 锁定时官方渲染的是「Lv14」+ 悬浮卡「14级粉丝福利」，
-                        // innerText 会粘成「Lv1414级粉丝福」，所以取 rank 前先剥掉后半截
+                        // 锁定时 innerText 粘成「Lv1414级粉丝福」，取 rank 前先剥掉后半截
                         isDefault: /colorDefault--/.test(cls),
                         locked: /lock--/.test(cls),
                         selected: /selected--/.test(cls),
-                        // 粉丝打卡不在 BARRAGE_RANKS 表里 → rank -1 → 下面 rank>0 直接过滤掉，不参与挑档
+                        // 粉丝打卡不在 BARRAGE_RANKS 表里 → rank -1 → 被 rank>0 过滤掉
                         rank: barrageColorRank(clean)
                     };
                 })
                 .filter(Boolean);
         }
 
-        // 面板只在可见时渲染。两套实现监听的事件不一样：
-        // React 的 onMouseEnter 只认真实 mouseenter，赛事房间 jQuery 绑的只认真实 mouseover，
-        // 所以两个都派，谁都不落下。
+        // 面板只在可见时渲染。React 那套只认真实 mouseenter、赛事那套只认真实 mouseover，故两个都派
         pokeBarrageTrigger(trigger) {
             const b = trigger.getBoundingClientRect();
             const at = {
@@ -2314,9 +2209,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             fireMouse(trigger, 'mouseenter', at);
         }
 
-        // 有些房间压根没有这功能，所以只探一下就够，别反复派发刷警告。
-        // 面板「打开」的标准是能读出颜色条目：赛事那套收起时 ul 是空的，
-        // React 那套收起时高度是 0 但条目已挂上，两种都得等条目真的在。
+        // 有些房间没这功能，只探一下别反复派发刷警告。判「打开」是能读出颜色条目：赛事收起时 ul 为空，React 收起时高度 0 但条目已挂
         async openBarragePanel(timeout = 2000) {
             const trigger = queryOne(SEL.fansBarrageTrigger);
             if (!trigger) return { panel: null, fired: 0, err: 'no-trigger' };
@@ -2349,7 +2242,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             const trigger = queryOne(SEL.fansBarrageTrigger);
             panel?.style.removeProperty('opacity');
             panel?.style.removeProperty('pointer-events');
-            // 赛事那套是自己把 display 置成 block 的，站侧的 mouseleave 收不干净就手动收
+            // 赛事那套自己置 display:block，站侧 mouseleave 收不干净时手动收
             if (panel && panel.id === SEL.fansClubColorPanel.slice(1)) {
                 panel.style.display = 'none';
             }
@@ -2377,10 +2270,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 const probe = await this.openBarragePanel();
                 panel = probe.panel;
                 if (!panel) {
-                    // 这里不能反推「有没有粉丝团」：实测 chuhe（普通粉丝团房间）
-                    // 在面板未打开时同样开不出粉丝弹幕标题，而静态彩色面板节点
-                    // 又在所有房间都存在，两条都成立，推不出结论。
-                    // clubPanel 保持未知，等面板真开出来时再定。
+                    // 不能反推有没有粉丝团：chuhe 房间面板未开时同样开不出标题，而静态节点所有房间都有；clubPanel 保持未知
                     return this.capFailed(
                         'barrage',
                         `fansbadge: 打不开弹幕颜色面板（已派发 ${probe.fired} 次${
@@ -2390,13 +2280,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     );
                 }
                 this.capOk('barrage');
-                // 面板类型就是「本房间有没有粉丝团」的判据：
-                // 粉丝团房间是 React 的「粉丝弹幕」（barrageColorClub 之外那套，走粉丝牌）；
-                // 赛事房间是 #J-room-club-color（走战队勋章 barrageColorClub），那种房间
-                // 没有粉丝团，再发 FAN_CLUB_OPEN 只会把「赛事VIP」广告面板顶出来。
+                // 面板类型即「有没有粉丝团」的判据；赛事房间没有粉丝团，再发 FAN_CLUB_OPEN 只会顶出「赛事VIP」广告面板
                 this.caps().clubPanel = panel.id === 'J-room-club-color' ? false : null;
                 if (this.caps().clubPanel === null) this.capOk('clubPanel');
-                // 面板会真弹到屏幕上（实测 340x213，居中），期间必须藏好
+                // 面板会真弹到屏幕上，期间必须藏好
                 panel.style.setProperty('opacity', '0', 'important');
                 panel.style.setProperty('pointer-events', 'none', 'important');
 
@@ -2414,8 +2301,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 const best = usable.reduce((acc, r) => (!acc || r.rank > acc.rank ? r : acc), null);
                 if (!best) {
                     const lockedRows = rows.filter((r) => r.locked);
-                    // 赛事房间全锁说明没佩戴战队勋章（官方 locked 判据是
-                    // usingTeamMedalId===0 || level < 门槛），值得说明白
+                    // 赛事房间全锁说明没佩戴战队勋章（locked 判据：usingTeamMedalId===0 || level<门槛）
                     log(
                         lockedRows.length
                             ? 'fansbadge: 本房间没有可用的弹幕颜色档（全部锁定）'
@@ -2432,25 +2318,16 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     log('fansbadge: 弹幕颜色已是最高档', best.label || `第${best.rank}档`);
                     return true;
                 }
-                // 两套都是 React，都能在 fiber 上拿到官方 handler：
-                //   粉丝团 RoomFanBarrageColor → onClick
-                //   赛事   barrageColorClub     → onPick
-                // 都是零参数、直接写 barrageColor.customColor。
-                //
-                // 官方的 li 上真正执行的是 onClick: function(){ n || r || a(t) }，
-                // 即 locked(n) 与 selected(r) 两道拦截都在 onClick 里，
-                // onPick 本身不拦。所以直调 onPick 会绕过这两道 —— 上面已经
-                // 过滤掉 locked、并且 best.selected 时提前返回，这里只做兜底。
+                // 两套都能在 fiber 上拿到官方 handler（粉丝团 onClick / 赛事 onPick），
+                // 零参数、直接写 customColor。拦截只在 onClick 里（locked、selected 两道），
+                // 直调 onPick 会绕过 —— 上面已过滤 locked 且 best.selected 提前返回，此处仅兜底
                 if (!best.locked && !best.selected && callOfficialBarrageHandler(best.span)) {
-                    // 命中官方 handler
+                    // 命中官方 handler，无需兜底
                 } else if (!reactClick(best.span)) {
                     best.span.click();
                 }
                 await sleep(600);
-                // 必须在关面板之前校验：mouseout 会把内容卸载掉。
-                // 比 rank 不比 label：赛事那套同色可能重复。
-                // best.rank > 0：白档（rank 0）在上面的 best.selected 分支就返回了，
-                // 走不到这里 —— 官方对已选中的档也是 no-op（onClick 里 r 拦截）。
+                // 必须在关面板之前校验：mouseout 会卸载内容。比 rank 不比 label（赛事那套同色可能重复）；rank>0 挡住白档
                 const after = this.readBarrageColors(panel).find((r) => r.selected);
                 if (after && after.rank === best.rank && best.rank > 0) {
                     log('fansbadge: 已切到最高档弹幕颜色', best.label || `第${best.rank}档`);
@@ -2469,16 +2346,12 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             return ok;
         }
     }
-    // 整站配色：必须在页面开始渲染前就挂上。
-    // 之前放在 main()（document-idle 附近）里做，实测进房卡 2~5 秒 ——
-    // 那时 video 正在起播、React 正在挂载，在 documentElement 上切 class 会触发
-    // 整页样式失效与重排，把进行中的渲染全打断重来。
-    // 提前到 document-start 做，等于在首帧之前就把样式备好，渲染时无需返工。
+    // 整站配色：先于 main() 挂上，进房即生效（不进设置面板也已就位）
     function applyThemeEarly() {
         let dark = false;
         try {
-            // 必须用 STORAGE_KEY，键名错了就读不到用户选的主题
-            const raw = store.get(STORAGE_KEY, null);
+            // 键名必须与设置面板一致，读不到退回默认（跟随浏览器）
+            const raw = store.get(NS, null);
             const saved = raw && typeof raw === 'object' ? raw.themeMode : null;
             const mode = THEME_MODES.includes(saved) ? saved : DEFAULT_SETTINGS.themeMode;
             dark =
@@ -2497,12 +2370,12 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
     }
 
-    // ---------- bootstrap（分层延迟，减轻进房头几秒卡顿） ----------
+    // ---------- bootstrap（分层延迟） ----------
     function main() {
         injectStyles();
         const settings = loadSettings();
 
-        // 面板本身跟随整站（早期已在 documentElement 挂好，这里只同步面板自己的 data-theme）
+        // 面板跟随整站，这里只同步自己的 data-theme
         const optimizer = new PlayerOptimizer(settings);
         const plusOne = new ScreenPlusOne(settings);
         const history = new DanmakuHistory(settings);
@@ -2524,9 +2397,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         log('initialized', settings);
     }
 
-    // 配色先走：这一步只读一次 GM 存储 + 挂个 class。
-    // 放在 main() 之前（但仍是 document-idle），这样其余功能开始跑之前
-    // 样式已经就位，不会等设置面板第一次打开才生效。
+    // 配色先走：只读一次 GM 存储 + 挂个 class，这样其余功能开跑前样式已就位
     applyThemeEarly();
 
     if (document.readyState === 'loading') {
