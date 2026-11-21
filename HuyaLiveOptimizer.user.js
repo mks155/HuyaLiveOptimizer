@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.5.4
+// @version      2.6.0
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -99,6 +99,10 @@
         enableDanmakuHistory: true,
         enableFansBadge: true,
         enableFansCheckIn: true,
+        // 小程序帧 / 开屏贴片 / 公屏广告 / 活动弹窗
+        enableAdBlock: true,
+        // 主播推荐：左下角图标、推荐面板、扫码试玩浮窗（主播接的游戏推广）
+        enablePresenterRec: true,
         // auto=跟随浏览器 / light=白天 / dark=夜晚
         themeMode: 'auto'
     };
@@ -178,6 +182,8 @@
             enableDanmakuHistory: data.enableDanmakuHistory ?? DEFAULT_SETTINGS.enableDanmakuHistory,
             enableFansBadge: data.enableFansBadge ?? DEFAULT_SETTINGS.enableFansBadge,
             enableFansCheckIn: data.enableFansCheckIn ?? DEFAULT_SETTINGS.enableFansCheckIn,
+            enableAdBlock: data.enableAdBlock ?? DEFAULT_SETTINGS.enableAdBlock,
+            enablePresenterRec: data.enablePresenterRec ?? DEFAULT_SETTINGS.enablePresenterRec,
             themeMode: THEME_MODES.includes(data.themeMode) ? data.themeMode : DEFAULT_SETTINGS.themeMode
         };
     }
@@ -190,6 +196,8 @@
             enableDanmakuHistory: s.enableDanmakuHistory,
             enableFansBadge: s.enableFansBadge,
             enableFansCheckIn: s.enableFansCheckIn,
+            enableAdBlock: s.enableAdBlock,
+            enablePresenterRec: s.enablePresenterRec,
             themeMode: s.themeMode
         });
     }
@@ -582,6 +590,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-danmu-freeze .hlo-dmbtn:hover{filter:brightness(1.12)}
 #hlo-danmu-freeze .hlo-dmbtn-report{background:linear-gradient(180deg,#ff9a1f,#f80);color:#111}
 #hlo-danmu-freeze .hlo-dmbtn[disabled]{opacity:.55;cursor:default;filter:none}
+
+/* 兜底：sweep 点完原生关闭后打的标记。首帧静态隐藏见 #hlo-ad-guard-styles（随开关注入）。
+   前置贴片 .pre-ab-new-wrap 不在列：它内部挂着 #player-video，藏了会连画面一起没 */
+[data-hlo-ad-hide]{display:none!important}
 `;
         document.head.appendChild(style);
     }
@@ -1181,6 +1193,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 <label class="row"><input type="checkbox" id="hlo-history" ${this.settings.enableDanmakuHistory !== false ? 'checked' : ''}/> 弹幕输入框上下键翻历史</label>
                 <label class="row"><input type="checkbox" id="hlo-fans-badge" ${this.settings.enableFansBadge !== false ? 'checked' : ''}/> 自动切最高档弹幕颜色</label>
                 <label class="row"><input type="checkbox" id="hlo-fans-checkin" ${this.settings.enableFansCheckIn !== false ? 'checked' : ''}/> 自动打卡名下全部粉丝团</label>
+                <label class="row"><input type="checkbox" id="hlo-ad-block" ${this.settings.enableAdBlock !== false ? 'checked' : ''}/> 广告拦截</label>
+                <label class="row"><input type="checkbox" id="hlo-presenter-rec" ${this.settings.enablePresenterRec !== false ? 'checked' : ''}/> 主播推荐拦截</label>
                 <div class="actions">
                     <button type="button" class="btn-ghost" id="hlo-close">关闭</button>
                     <button type="button" class="btn-primary" id="hlo-save">保存并应用</button>
@@ -1258,6 +1272,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     enableDanmakuHistory: !!panel.querySelector('#hlo-history')?.checked,
                     enableFansBadge: !!panel.querySelector('#hlo-fans-badge')?.checked,
                     enableFansCheckIn: !!panel.querySelector('#hlo-fans-checkin')?.checked,
+                    enableAdBlock: !!panel.querySelector('#hlo-ad-block')?.checked,
+                    enablePresenterRec: !!panel.querySelector('#hlo-presenter-rec')?.checked,
                     themeMode: THEME_MODES.includes(this.settings.themeMode) ? this.settings.themeMode : 'auto'
                 };
                 saveSettings(this.settings);
@@ -2370,6 +2386,190 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
     }
 
+    // ---------- 广告拦截 ----------
+    // 只认已知形态，不做通用广告过滤。
+    // 前置贴片会把 #player-video 挪进自己的 .video-container，隐藏会连画面一起没，所以只能点原生「跳过」。
+    const AD_FRAME_UUIDS = ['7q5dta52'];
+    const AD_FRAME_NAMES = ['主播优选', '电商直播弹窗'];
+    const AD_FRAME_TAG = 'data-hlo-ad-frame';
+    const AD_HIDE_TAG = 'data-hlo-ad-hide';
+
+    const nativeSetAttr = Element.prototype.setAttribute;
+    const adFrameSet = new WeakSet();
+    const adClickCount = new WeakMap();
+
+    // 静态隐藏按开关注入，节点插入首帧即 display:none，不等 sweep
+    const AD_HIDE_GROUPS = {
+        ad: '#public-screen-ab,.common-popup',
+        rec: '.ab-icon.xsb-icon,.component-ab-pannel,.player-smallhandle-panel,.small-handle-tip'
+    };
+    let adGuardState = { ad: true, rec: true };
+
+    function applyAdGuardSettings(settings) {
+        adGuardState = {
+            ad: !settings || settings.enableAdBlock !== false,
+            rec: !settings || settings.enablePresenterRec !== false
+        };
+        let el = document.getElementById('hlo-ad-guard-styles');
+        if (!el) {
+            el = document.createElement('style');
+            el.id = 'hlo-ad-guard-styles';
+            (document.head || document.documentElement).appendChild(el);
+        }
+        el.textContent = Object.keys(AD_HIDE_GROUPS)
+            .filter((k) => adGuardState[k])
+            .map((k) => AD_HIDE_GROUPS[k] + '{display:none!important}')
+            .join('\n');
+        // 关掉的那组要摘标记，否则 [data-hlo-ad-hide] 还压着它
+        Object.keys(AD_HIDE_GROUPS).forEach((k) => {
+            if (adGuardState[k]) return;
+            const sel = AD_HIDE_GROUPS[k].split(',')
+                .map((s) => s.trim() + '[' + AD_HIDE_TAG + ']')
+                .join(',');
+            document.querySelectorAll(sel).forEach((node) => node.removeAttribute(AD_HIDE_TAG));
+        });
+    }
+
+    /** 小程序广告帧：*-<uuid>.ext.huya.com，或路径带广告名 */
+    function isAdFrameUrl(raw) {
+        let url;
+        try {
+            url = new URL(String(raw), location.href);
+        } catch (e) {
+            return false;
+        }
+        if (!/^https?:$/.test(url.protocol)) return false;
+        const m = /^[a-z0-9]+-([a-z0-9]+)\.ext\.huya\.com$/i.exec(url.hostname);
+        if (!m) return false;
+        if (AD_FRAME_UUIDS.indexOf(m[1].toLowerCase()) !== -1) return true;
+        let path = url.pathname;
+        try {
+            path = decodeURIComponent(path);
+        } catch (e) {
+        }
+        return AD_FRAME_NAMES.some((name) => path.indexOf(name) !== -1);
+    }
+
+    /** 换成 about:blank，广告代码根本不会加载 */
+    function blankAdFrame(frame) {
+        if (adFrameSet.has(frame)) return false;
+        adFrameSet.add(frame);
+        const src = frame.getAttribute('src') || frame.src || '';
+        nativeSetAttr.call(frame, AD_FRAME_TAG, '1');
+        const desc = Object.getOwnPropertyDescriptor(
+            (unsafeWindow && unsafeWindow.HTMLIFrameElement ? unsafeWindow.HTMLIFrameElement : HTMLIFrameElement).prototype,
+            'src'
+        );
+        if (desc && desc.set) desc.set.call(frame, 'about:blank');
+        else nativeSetAttr.call(frame, 'src', 'about:blank');
+        log('广告帧已拦', src);
+        return true;
+    }
+
+    function hookAdFrames() {
+        const proto = (unsafeWindow && unsafeWindow.HTMLIFrameElement ? unsafeWindow.HTMLIFrameElement : HTMLIFrameElement).prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'src');
+        if (!desc || !desc.configurable || !desc.set) return;
+        Object.defineProperty(proto, 'src', {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get: desc.get,
+            set(value) {
+                if (adGuardState.ad && isAdFrameUrl(value)) {
+                    adFrameSet.add(this);
+                    nativeSetAttr.call(this, AD_FRAME_TAG, '1');
+                    return desc.set.call(this, 'about:blank');
+                }
+                return desc.set.call(this, value);
+            }
+        });
+    }
+
+    /** 同一元素最多点 max 次，等站点把事件绑上 */
+    function tryClick(el, max = 3) {
+        if (!el) return false;
+        const n = adClickCount.get(el) || 0;
+        if (n >= max) return false;
+        adClickCount.set(el, n + 1);
+        try {
+            el.click();
+        } catch (e) {
+        }
+        return true;
+    }
+
+    function hideAd(el) {
+        if (!el || el.getAttribute(AD_HIDE_TAG) === '1') return false;
+        nativeSetAttr.call(el, AD_HIDE_TAG, '1');
+        return true;
+    }
+
+    function sweepAds() {
+        if (document.hidden) return;
+
+        if (adGuardState.ad) {
+            document.querySelectorAll('iframe').forEach((frame) => {
+                if (frame.hasAttribute(AD_FRAME_TAG)) return;
+                if (isAdFrameUrl(frame.getAttribute('src') || frame.src)) blankAdFrame(frame);
+            });
+
+            // 前置贴片：只点「跳过」，等它自己收场
+            const preAd = document.querySelector('.pre-ab-new-wrap');
+            if (preAd) tryClick(preAd.querySelector('.ab-skip'), 6);
+
+            // 右侧公屏广告
+            const sideAd = document.querySelector('#public-screen-ab');
+            if (sideAd) {
+                tryClick(sideAd.querySelector('.close-btn,.ab-close,.ab-close-2'));
+                hideAd(sideAd);
+            }
+
+            // 活动弹窗
+            document.querySelectorAll('.common-popup').forEach((pop) => {
+                tryClick(pop.querySelector('.popup-close-btn,.close-btn'));
+                hideAd(pop);
+            });
+        }
+
+        if (adGuardState.rec) {
+            // 主播推荐：入口图标、推荐面板、扫码试玩浮窗
+            document.querySelectorAll('.ab-icon.xsb-icon,.component-ab-pannel,.player-smallhandle-panel,.small-handle-tip').forEach((el) => {
+                tryClick(el.querySelector('.close-btn'));
+                hideAd(el);
+            });
+        }
+    }
+
+    function startAdGuard() {
+        // 静态隐藏样式先落，按开关状态注入
+        applyAdGuardSettings(loadSettings());
+        injectStyles();
+        hookAdFrames();
+        sweepAds();
+        // 节流而非防抖：弹幕会持续往 DOM 里塞节点，防抖定时器会被无限推迟，sweep 就饿死了
+        let scheduled = false;
+        let lastRun = 0;
+        function schedule() {
+            if (scheduled) return;
+            scheduled = true;
+            const wait = Math.max(0, 200 - (Date.now() - lastRun));
+            setTimeout(() => {
+                scheduled = false;
+                lastRun = Date.now();
+                sweepAds();
+            }, wait);
+        }
+        new MutationObserver(schedule).observe(document.documentElement, {
+            childList: true, subtree: true, attributes: true, attributeFilter: ['src']
+        });
+        setInterval(() => {
+            if (!document.hidden) sweepAds();
+        }, 2000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) sweepAds();
+        });
+    }
+
     // ---------- bootstrap（分层延迟） ----------
     function main() {
         injectStyles();
@@ -2386,6 +2586,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             history.update(next);
             optimizer.updateSettings(next);
             fansBadge.update(next);
+            applyAdGuardSettings(next);
         });
 
         optimizer.startWatchdog();
@@ -2399,6 +2600,8 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 
     // 配色先走：只读一次 GM 存储 + 挂个 class，这样其余功能开跑前样式已就位
     applyThemeEarly();
+    // 广告拦截也尽早：hook 住 iframe 的 src，赶在站点赋值之前
+    startAdGuard();
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => setTimeout(main, 150));
