@@ -3,7 +3,7 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.6.0
+// @version      2.7.0
 // @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
@@ -103,6 +103,8 @@
         enableAdBlock: true,
         // 主播推荐：左下角图标、推荐面板、扫码试玩浮窗（主播接的游戏推广）
         enablePresenterRec: true,
+        // 直播时移：←/→ 快退快进 10s，R 回直播
+        enableLiveSeek: true,
         // auto=跟随浏览器 / light=白天 / dark=夜晚
         themeMode: 'auto'
     };
@@ -184,6 +186,7 @@
             enableFansCheckIn: data.enableFansCheckIn ?? DEFAULT_SETTINGS.enableFansCheckIn,
             enableAdBlock: data.enableAdBlock ?? DEFAULT_SETTINGS.enableAdBlock,
             enablePresenterRec: data.enablePresenterRec ?? DEFAULT_SETTINGS.enablePresenterRec,
+            enableLiveSeek: data.enableLiveSeek ?? DEFAULT_SETTINGS.enableLiveSeek,
             themeMode: THEME_MODES.includes(data.themeMode) ? data.themeMode : DEFAULT_SETTINGS.themeMode
         };
     }
@@ -198,6 +201,7 @@
             enableFansCheckIn: s.enableFansCheckIn,
             enableAdBlock: s.enableAdBlock,
             enablePresenterRec: s.enablePresenterRec,
+            enableLiveSeek: s.enableLiveSeek,
             themeMode: s.themeMode
         });
     }
@@ -590,6 +594,16 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
 #hlo-danmu-freeze .hlo-dmbtn:hover{filter:brightness(1.12)}
 #hlo-danmu-freeze .hlo-dmbtn-report{background:linear-gradient(180deg,#ff9a1f,#f80);color:#111}
 #hlo-danmu-freeze .hlo-dmbtn[disabled]{opacity:.55;cursor:default;filter:none}
+
+/* 时移偏移提示：贴在回看条上方 */
+#hlo-seek-tip{
+  position:fixed;z-index:2147483002;transform:translateX(-50%);
+  padding:3px 8px;border-radius:6px;background:rgba(0,0,0,.72);color:#fff;
+  font-size:13px;font-weight:600;line-height:18px;white-space:nowrap;
+  font-variant-numeric:tabular-nums;pointer-events:none;
+  opacity:0;transition:opacity .15s ease
+}
+#hlo-seek-tip.hlo-show{opacity:1}
 
 /* 兜底：sweep 点完原生关闭后打的标记。首帧静态隐藏见 #hlo-ad-guard-styles（随开关注入）。
    前置贴片 .pre-ab-new-wrap 不在列：它内部挂着 #player-video，藏了会连画面一起没 */
@@ -1195,6 +1209,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 <label class="row"><input type="checkbox" id="hlo-fans-checkin" ${this.settings.enableFansCheckIn !== false ? 'checked' : ''}/> 自动打卡名下全部粉丝团</label>
                 <label class="row"><input type="checkbox" id="hlo-ad-block" ${this.settings.enableAdBlock !== false ? 'checked' : ''}/> 广告拦截</label>
                 <label class="row"><input type="checkbox" id="hlo-presenter-rec" ${this.settings.enablePresenterRec !== false ? 'checked' : ''}/> 主播推荐拦截</label>
+                <label class="row"><input type="checkbox" id="hlo-live-seek" ${this.settings.enableLiveSeek !== false ? 'checked' : ''}/> 直播时移（←/→ 快退快进，R 回直播）</label>
                 <div class="actions">
                     <button type="button" class="btn-ghost" id="hlo-close">关闭</button>
                     <button type="button" class="btn-primary" id="hlo-save">保存并应用</button>
@@ -1274,6 +1289,7 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                     enableFansCheckIn: !!panel.querySelector('#hlo-fans-checkin')?.checked,
                     enableAdBlock: !!panel.querySelector('#hlo-ad-block')?.checked,
                     enablePresenterRec: !!panel.querySelector('#hlo-presenter-rec')?.checked,
+                    enableLiveSeek: !!panel.querySelector('#hlo-live-seek')?.checked,
                     themeMode: THEME_MODES.includes(this.settings.themeMode) ? this.settings.themeMode : 'auto'
                 };
                 saveSettings(this.settings);
@@ -1717,6 +1733,386 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         }
     }
 
+    // ---------- 直播时移：←/→ 快退快进，R 回直播 ----------
+    // 必须跑在页面主世界（下面用 <script> 注入）：
+    //   ① 官方进回看只认 .match-replay-bg 上的 mousedown + document 的 mouseup（Bt/Vt）；
+    //   ② 官方 seek 只认 G.matchReplaySeekTime 再 G.vplayer.seek()，改 video.currentTime 不换流；
+    //   ③ TM 沙箱的 window 不是真正的 Window，MouseEvent 传 view:window 会抛 TypeError，
+    //      而拿 player 又要穿过 unsafeWindow 代理，两个坑都在主世界直接消失。
+    const LIVE_SEEK_PAGE_SRC = `
+(function () {
+    if (window.__hloLiveSeek) return;
+    window.__hloLiveSeek = true;
+
+    var tipTimer = 0, entering = false, target = null, lastKey = 0, applyTimer = 0, lastApply = 0;
+    // 是否已经由本脚本（或官方手势）切进直播回看态；用来区分「回看」和「点播/录播」
+    var inLiveReplay = false;
+    // 设置页开关；关闭后连按键都不拦，不影响官方快捷键
+    var enabled = true;
+
+    function log() {
+        try {
+            console.log.apply(console, ['[hlo-seek]'].concat([].slice.call(arguments)));
+        } catch (e) {
+        }
+    }
+
+    function sleep(ms) {
+        return new Promise(function (r) {
+            setTimeout(r, ms);
+        });
+    }
+
+    function video() {
+        return document.querySelector('#hy-video') || document.querySelector('#player-wrap video') || document.querySelector('video');
+    }
+
+    /** 时长有限 = 已在回放流上（直播流是 Infinity） */
+    function inReplay(v) {
+        return !!v && isFinite(v.duration) && v.duration > 0;
+    }
+
+    /** 回看条尺寸；宽度拿不到说明这间没回看 */
+    function trackRect() {
+        var t = document.querySelector('.match-replay-track');
+        if (!t) return null;
+        var r = t.getBoundingClientRect();
+        return r.width < 10 ? null : r;
+    }
+
+    /** 65m30s / 1m20s / 59s，分钟不折成小时，可带 +/- */
+    function fmt(sec, sign) {
+        sec = Math.max(0, Math.round(sec));
+        var s;
+        if (sec < 60) s = sec + 's';
+        else {
+            var m = Math.floor(sec / 60), r = sec % 60;
+            s = r ? m + 'm' + r + 's' : m + 'm';
+        }
+        return sign ? (sign > 0 ? '+' + s : '-' + s) : s;
+    }
+
+    function showTip(text, sticky) {
+        var el = document.getElementById('hlo-seek-tip');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'hlo-seek-tip';
+            (document.body || document.documentElement).appendChild(el);
+        }
+        el.textContent = text;
+        var r = trackRect();
+        if (r) {
+            el.style.left = Math.round(r.left + r.width / 2) + 'px';
+            el.style.top = Math.round(r.top - 34) + 'px';
+            el.style.bottom = 'auto';
+        } else {
+            el.style.left = '50%';
+            el.style.top = 'auto';
+            el.style.bottom = '96px';
+        }
+        el.classList.add('hlo-show');
+        clearTimeout(tipTimer);
+        tipTimer = setTimeout(hideTip, sticky ? 2600 : 1400);
+    }
+
+    function hideTip() {
+        var el = document.getElementById('hlo-seek-tip');
+        if (el) el.classList.remove('hlo-show');
+    }
+
+    /** ready 的参数就是播放器实例，G / vcore / vplayer 都挂在上面 */
+    function getPlayer() {
+        return new Promise(function (res) {
+            var done = false;
+            function fin(x) {
+                if (done) return;
+                done = true;
+                res(x || null);
+            }
+            try {
+                var P = window.TT_ROOM_PLAYER;
+                if (!P || typeof P.ready !== 'function') return fin(null);
+                P.ready(fin);
+            } catch (e) {
+                fin(null);
+            }
+            setTimeout(function () {
+                fin(null);
+            }, 1000);
+        });
+    }
+
+    /**
+     * 官方手势：mousedown 打在 .match-replay-bg（Bt），mouseup 落到 document（Vt）。
+     * 直播态 Vt 会 matchReplaySeekTime = ratio*H 再 Ot() 切流；回看态直接 seek。
+     * 注意不要传 view：沙箱/跨世界时会抛 TypeError，官方也只读 pageX。
+     */
+    function gesture(ratio) {
+        var bg = document.querySelector('.match-replay-bg');
+        var r = trackRect();
+        if (!bg || !r) return false;
+        var x = Math.round(r.left + r.width * Math.max(0, Math.min(1, ratio)));
+        var y = Math.round(r.top + r.height / 2);
+        var mk = function (type) {
+            return new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+                button: 0
+            });
+        };
+        bg.dispatchEvent(mk('mousedown'));
+        document.dispatchEvent(mk('mouseup'));
+        return true;
+    }
+
+    /** 有回看条 = 官方赛事回看；时长有限但没有回看条 = 点播/录播 */
+    function vodMode() {
+        return !inLiveReplay && !trackRect();
+    }
+
+    /** 回看走官方 API（写 seekTime 再 seek，内部重拉分段），点播/录播直接改 currentTime */
+    function seekTo(sec) {
+        var v = video();
+        if (!v || !isFinite(v.duration)) return Promise.resolve(false);
+        var t = Math.max(0, Math.min(v.duration - 0.2, sec));
+        if (vodMode()) {
+            try {
+                v.currentTime = t;
+                return Promise.resolve(true);
+            } catch (e) {
+                return Promise.resolve(false);
+            }
+        }
+        return getPlayer().then(function (p) {
+            if (!p || !p.G) return false;
+            p.G.matchReplaySeekTime = t;
+            try {
+                p.G.vplayer.seek();
+            } catch (e) {
+                try {
+                    p.vcore.seek();
+                } catch (e2) {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
+
+    /** 连按合并：500ms 内只发一次 seek，别把 CDN 打爆 */
+    function scheduleApply() {
+        if (applyTimer) return;
+        var wait = Math.max(0, 500 - (Date.now() - lastApply));
+        applyTimer = setTimeout(function () {
+            applyTimer = 0;
+            lastApply = Date.now();
+            if (target != null) seekTo(target);
+        }, wait);
+    }
+
+    /** 直播态进回看，等流真的可播；返回 ok / login / blocked / no-bar / busy */
+    async function enterReplay() {
+        if (entering) return 'busy';
+        entering = true;
+        try {
+            // 页面刚打开时回看条可能还没渲染，先等一会儿再判「不支持」
+            for (var w = 0; w < 12 && !trackRect(); w++) await sleep(200);
+            if (!trackRect()) return 'no-bar';
+            showTip('进入回看…', true);
+            if (!gesture(0.98)) return 'no-bar';
+            var deadline = Date.now() + 8000;
+            while (Date.now() < deadline) {
+                await sleep(200);
+                if (inReplay(video())) break;
+            }
+            if (!inReplay(video())) {
+                var p = await getPlayer();
+                var login = p && p.G ? p.G.isLogin : null;
+                log('enter failed', { isLogin: login });
+                return login === false ? 'login' : 'blocked';
+            }
+            for (var i = 0; i < 30; i++) {
+                var v = video();
+                if (v && v.readyState >= 3) break;
+                await sleep(200);
+            }
+            inLiveReplay = true;
+            return 'ok';
+        } finally {
+            entering = false;
+        }
+    }
+
+    async function step(delta) {
+        if (entering) return;
+        var now = Date.now();
+        if (now - lastKey > 1200) target = null;
+        lastKey = now;
+
+        var v = video();
+        if (!v) return;
+
+        if (!inReplay(v)) {
+            // 直播中快进没有意义，别误触把人带进回看
+            if (delta > 0) return;
+            var r = await enterReplay();
+            if (r === 'busy') return;
+            if (r !== 'ok') {
+                showTip(
+                    r === 'login' ? '回看需登录虎牙账号' : r === 'no-bar' ? '当前直播间不支持时移' : '进入回看失败',
+                    true
+                );
+                return;
+            }
+            v = video();
+            if (!inReplay(v)) return;
+            // 官方切回看时自己会 seek 到 H-40，先等它落定，否则我们的 -10s 会被覆盖
+            await sleep(1200);
+            v = video();
+            if (!v || !inReplay(v)) return;
+            target = Math.max(0, v.duration - 10);
+            showTip(fmt(10, -1), true);
+            await seekTo(target);
+            // seek 是重新拉分段，位置要等流到位再读，否则会显示缓冲中的旧偏移
+            var vv;
+            for (var j = 0; j < 20; j++) {
+                await sleep(200);
+                vv = video();
+                if (vv && inReplay(vv) && Math.abs(vv.currentTime - target) < 2.5) break;
+            }
+            vv = video();
+            if (vv && inReplay(vv)) {
+                target = vv.currentTime;
+                showTip(fmt(vv.duration - vv.currentTime, -1), true);
+            }
+            return;
+        }
+
+        var H = v.duration;
+        var base = target == null ? v.currentTime : target;
+
+        if (vodMode()) {
+            // 点播/录播没有「直播点」可比，提示直接给当前播放位置
+            target = Math.max(0, Math.min(H, base + delta));
+            showTip(fmt(target));
+            seekTo(target);
+            return;
+        }
+
+        // 快进到直播边缘（3s 内）就直接回直播：seek 到流末尾会卡缓冲，画面反而断掉
+        if (delta > 0 && base + delta > H - 3) {
+            backToLive();
+            return;
+        }
+
+        target = Math.max(0, Math.min(H, base + delta));
+        showTip(fmt(H - target, delta < 0 ? -1 : 1));
+        scheduleApply();
+    }
+
+    function backToLive() {
+        target = null;
+        if (applyTimer) {
+            clearTimeout(applyTimer);
+            applyTimer = 0;
+        }
+        hideTip();
+        // 点播/录播没有直播可回
+        if (vodMode()) return;
+        // 本来就在直播时不要点：返回直播的处理器会停流重拉，画面会抖一下
+        if (!inReplay(video())) return;
+        var btns = [].slice.call(document.querySelectorAll('.player-back-live'));
+        var btn = btns.filter(function (b) {
+            return b.getBoundingClientRect().width > 0;
+        })[0] || btns[0];
+        if (btn) {
+            try {
+                btn.click();
+            } catch (e) {
+            }
+        }
+        inLiveReplay = false;
+    }
+
+    function onKey(e) {
+        if (!enabled) return;
+        if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'r' && e.key !== 'R') return;
+        if (!video()) return;
+        e.preventDefault();
+        if (e.key === 'ArrowLeft') step(-10);
+        else if (e.key === 'ArrowRight') step(10);
+        else backToLive();
+    }
+
+    /** 设置页开关：关掉后不拦按键，顺手清掉残留提示 */
+    function setEnabled(on) {
+        enabled = !!on;
+        if (enabled) return;
+        target = null;
+        if (applyTimer) {
+            clearTimeout(applyTimer);
+            applyTimer = 0;
+        }
+        hideTip();
+    }
+
+    window.addEventListener('keydown', onKey, true);
+    // 设置页跨世界通知开关；detail 用布尔值，避开沙箱对象跨 realm 的坑
+    document.addEventListener('hlo-live-seek', function (ev) {
+        setEnabled(!ev || ev.detail !== false);
+    });
+    // 留给调试/验收用，正常使用不依赖
+    window.__hloLiveSeekApi = {
+        step: step,
+        back: backToLive,
+        setEnabled: setEnabled,
+        state: function () {
+            var v = video();
+            return { cur: v ? v.currentTime : null, dur: v ? v.duration : null, target: target, enabled: enabled };
+        }
+    };
+    log('installed');
+})();
+`;
+
+    // 注入页面主世界：huya 的 CSP 是 script-src 'unsafe-inline'，内联脚本可执行
+    class LiveSeek {
+        constructor(settings) {
+            this.settings = settings;
+        }
+
+        install() {
+            try {
+                const s = document.createElement('script');
+                s.textContent = LIVE_SEEK_PAGE_SRC;
+                (document.head || document.documentElement).appendChild(s);
+                s.remove();
+            } catch (e) {
+                log('LiveSeek 注入失败', e);
+            }
+            this.apply();
+        }
+
+        /** 开关通过 DOM 事件传给主世界，不读 unsafeWindow 代理 */
+        apply() {
+            const on = this.settings.enableLiveSeek !== false;
+            try {
+                document.dispatchEvent(new CustomEvent('hlo-live-seek', { detail: on }));
+            } catch (e) {
+                warn('LiveSeek 开关下发失败', e);
+            }
+        }
+
+        update(settings) {
+            this.settings = settings;
+            this.apply();
+        }
+    }
 // ---------- 粉丝团：弹幕颜色 + 打卡 ----------
     // 打卡直接走站侧 WUP，不开面板：getFansSign 读状态，setFansSign 写（iCode===0 成功，否则 sMsg 是原因）
     // 当天已打卡是位掩码：1 << (iPos - 1) & lSignInFlag
@@ -2580,16 +2976,19 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         const plusOne = new ScreenPlusOne(settings);
         const history = new DanmakuHistory(settings);
         const fansBadge = new FansBadge(settings);
+        const liveSeek = new LiveSeek(settings);
 
         const ui = new SettingsUI(optimizer, settings, (next) => {
             plusOne.update(next);
             history.update(next);
             optimizer.updateSettings(next);
             fansBadge.update(next);
+            liveSeek.update(next);
             applyAdGuardSettings(next);
         });
 
         optimizer.startWatchdog();
+        liveSeek.install();
         scheduleIdle(() => ui.watchButton(), 1200);
         scheduleIdle(() => history.bind(), 3500);
         scheduleIdle(() => plusOne.bind(), 4000);
