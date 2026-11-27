@@ -3,8 +3,8 @@
 // @namespace    https://github.com/mks155
 // @homepageURL  https://github.com/mks155/HuyaLiveOptimizer
 // @icon         https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg
-// @version      2.7.0
-// @description  进直播间自动解锁画质扫码限制、秒切最高/指定清晰度、一键进入观影模式；画面弹幕悬停可 +1 复读，发送框 ↑↓ 翻历史。设置全站生效，安装即用 | Auto unlock quality, switch to 4K/50M, theater mode, screen-danmaku +1, send history
+// @version      2.7.2
+// @description  虎牙直播间一站式增强：免扫码高画质、自动最高清晰度与观影模式；弹幕 +1 复读、↑↓ 发送历史、自动配色；粉丝团自动打卡；广告与主播推荐拦截；直播时移（←/→ 快退快进、R 回直播）；整站暗色等功能
 // @author       mks155
 // @copyright    2025, mks155 (https://github.com/mks155)
 // @match        *://*.huya.com/*
@@ -2799,6 +2799,20 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         ad: '#public-screen-ab,.common-popup',
         rec: '.ab-icon.xsb-icon,.component-ab-pannel,.player-smallhandle-panel,.small-handle-tip'
     };
+
+    // 主播优选双屏广告：官方把 #player-video 挪进 .new-reward-ab-container 的
+    // .video-container 再缩到 68%，右边挂广告牌。整块隐藏会把直播画面一起藏掉，
+    // 所以这里只藏广告牌，把播放区按回全宽；广告本体静音后留它自己播完，
+    // 官方清理时才会把 #player-video 还回 #player-wrap。
+    const AD_EXTRA_CSS = {
+        rec: [
+            '.new-reward-ab-container>.bg',
+            '.new-reward-ab-container .new-reward-ab-wrap',
+            '.new-reward-ab-container .ad-open-vip-btn'
+        ].map((s) => s + '{display:none!important}').join('\n') + '\n' +
+            '.new-reward-ab-container .video-container{animation:none!important;width:100%!important;height:100%!important;margin:0!important}\n' +
+            '.new-reward-ab-container.video-out .video-container{animation:none!important}'
+    };
     let adGuardState = { ad: true, rec: true };
 
     function applyAdGuardSettings(settings) {
@@ -2812,9 +2826,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
             el.id = 'hlo-ad-guard-styles';
             (document.head || document.documentElement).appendChild(el);
         }
-        el.textContent = Object.keys(AD_HIDE_GROUPS)
-            .filter((k) => adGuardState[k])
+        const active = Object.keys(AD_HIDE_GROUPS).filter((k) => adGuardState[k]);
+        el.textContent = active
             .map((k) => AD_HIDE_GROUPS[k] + '{display:none!important}')
+            .concat(active.filter((k) => AD_EXTRA_CSS[k]).map((k) => AD_EXTRA_CSS[k]))
             .join('\n');
         // 关掉的那组要摘标记，否则 [data-hlo-ad-hide] 还压着它
         Object.keys(AD_HIDE_GROUPS).forEach((k) => {
@@ -2900,6 +2915,33 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
         return true;
     }
 
+    function muteRewardMedia(media) {
+        if (!media || media.muted) return;
+        media.muted = true;
+        try {
+            media.volume = 0;
+        } catch (e) {
+        }
+    }
+
+    /** 新插入的广告音视频立刻静音，不等 200ms 节流 */
+    function muteFreshRewardMedia(records) {
+        if (!adGuardState.rec) return;
+        records.forEach((rec) => {
+            rec.addedNodes.forEach((node) => {
+                if (node.nodeType !== 1) return;
+                if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') {
+                    if (node.closest('.new-reward-ab-container')) muteRewardMedia(node);
+                    return;
+                }
+                if (!node.querySelectorAll) return;
+                node.querySelectorAll('video,audio').forEach((media) => {
+                    if (media.closest('.new-reward-ab-container')) muteRewardMedia(media);
+                });
+            });
+        });
+    }
+
     function sweepAds() {
         if (document.hidden) return;
 
@@ -2933,6 +2975,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 tryClick(el.querySelector('.close-btn'));
                 hideAd(el);
             });
+
+            // 主播优选双屏广告：广告牌已由 CSS 隐藏，这里把它的声音掐掉；
+            // 画面留着让它自己播完，官方清理时才会把 #player-video 还回去
+            document.querySelectorAll('.new-reward-ab-container video,.new-reward-ab-container audio').forEach(muteRewardMedia);
         }
     }
 
@@ -2955,7 +3001,10 @@ ul.player-gift-right>li{float:none!important;flex:0 0 auto!important}
                 sweepAds();
             }, wait);
         }
-        new MutationObserver(schedule).observe(document.documentElement, {
+        new MutationObserver((records) => {
+            muteFreshRewardMedia(records);
+            schedule();
+        }).observe(document.documentElement, {
             childList: true, subtree: true, attributes: true, attributeFilter: ['src']
         });
         setInterval(() => {

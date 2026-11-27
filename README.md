@@ -1,8 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/mks155/HuyaLiveOptimizer/main/docs/icon.svg" alt="虎牙直播优化器" width="76" height="76">
   <h1>虎牙直播优化器 | HuyaLiveOptimizer</h1>
-  <p>进直播间自动优化清晰度、弹幕、粉丝牌与整站配色，进房即生效，无需每次手动点</p>
-  <p><sub>Auto-optimize Huya live rooms (quality, danmaku, fan badges, site-wide dark theme) so the right setup is ready the moment the room opens.</sub></p>
+  <p>一键增强虎牙直播间：画质、弹幕、粉丝团、广告与回看</p>
   <p>
     <a href="https://scriptcat.org/"><img src="https://img.shields.io/badge/ScriptCat-2f6fed?label=%E9%A6%96%E9%80%89" alt="脚本猫 ScriptCat（首选）"></a>
     <a href="https://www.tampermonkey.net/"><img src="https://img.shields.io/badge/Tampermonkey-42a5f5" alt="Tampermonkey"></a>
@@ -35,14 +34,14 @@
 - **自动打卡**：进房 30 秒后，自动签到**名下全部粉丝团**
 - **整站暗色配色**：一键把整个虎牙页面切成暗色
 - **广告拦截**：清掉小程序帧（主播优选 / 电商直播）、开屏贴片、右侧公屏广告、活动弹窗
-- **主播推荐拦截**：隐藏左下角「主播推荐」图标、点开的推荐面板与扫码试玩浮窗
+- **主播推荐拦截**：隐藏左下角「主播推荐」图标、点开的推荐面板与扫码试玩浮窗，以及直播中右侧弹出的「主播优选」广告（播放器不再缩小）
 - **直播时移**：直播中直接按键盘 <kbd>←</kbd> 切回看并落到**直播点前 10s**；回看中 <kbd>←</kbd>/<kbd>→</kbd> 每次 10s（按住连续倒退/前进），即快进快退功能，与视频播放器使用一致，<kbd>R</kbd> 键返回直播
 
 ## 安装
 
 1. 装一个脚本管理器，**首选 [Tampermonkey](https://www.tampermonkey.net/)**，也兼容 [脚本猫 ScriptCat](https://scriptcat.org/) 和 [Violentmonkey](https://violentmonkey.github.io/)
 2. 从[脚本猫安装页](https://scriptcat.org/zh-CN/script-show-page/8254)一键装，或手动导入本仓库的 `HuyaLiveOptimizer.user.js`
-3. 打开任意 `huya.com` 直播间，进房后一切自动生效
+3. 打开任意 `huya.com` 直播间即可使用
 
 ## 怎么设置
 
@@ -52,7 +51,7 @@
 |------|------|
 | 默认画质（全站生效） | 最高画质（默认），或固定 4K / 2K / 蓝光50M / 30M / 20M / 15M / 10M / 8M / 4M / 超清 / 流畅 |
 | 广告拦截 | 小程序帧、开屏贴片、公屏广告、活动弹窗，默认开 |
-| 主播推荐拦截 | 左下角「主播推荐」图标、推荐面板、扫码试玩浮窗，默认开 |
+| 主播推荐拦截 | 左下角「主播推荐」图标、推荐面板、扫码试玩浮窗、直播中「主播优选」双屏广告，默认开 |
 | 整站配色 | 点面板**右上角**的图标在「跟随浏览器 / 白天 / 夜晚」间循环，**影响整个虎牙页面** |
 
 改完点右侧 **保存并应用** 即可。
